@@ -1,5 +1,4 @@
 from torch import nn
-from trident.slide_encoder_models import ABMILSlideEncoder
 from typing import Literal
 
 class ABMIL(nn.Module):
@@ -25,3 +24,5 @@ class ABMIL(nn.Module):
             return  logits
         else:
             return slide_emb
+
+#placeholder
