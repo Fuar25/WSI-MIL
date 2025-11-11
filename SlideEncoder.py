@@ -1,5 +1,6 @@
 from torch import nn
 from typing import Literal
+import torch.nn.functional as F
 
 class ABMIL(nn.Module):
     def __init__(self, feature_dim, atte_emb_dim, hidden_dim, class_num):
@@ -10,13 +11,11 @@ class ABMIL(nn.Module):
             hidden_dim = hidden_dim
         )
         self.classifier = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
-            nn.ReLU(),
             nn.Linear(hidden_dim, 1 if class_num==2 else class_num)
         )
 
     def forward(self, x, which: Literal['logits', 'slide_emb'] = 'logits', device='cuda:1'):
-        slide_emb = self.slide_encoder(x,device=device)
+        slide_emb = self.slide_encoder(x)
         logits = self.classifier(slide_emb)
         if which == 'logits':
             return  logits
@@ -42,8 +41,9 @@ class ABMIL_block(nn.Module):
         )
 
     def forward(self, bags):
+        bags = bags.squeeze(0)
         pre_embs = self.pre_emb_layer(bags)
-        attention_scores = self.attention_layer(pre_embs)
+        attention_scores = F.softmax(self.attention_layer(pre_embs), dim=0)
         weighted_embs = attention_scores.T @ pre_embs
 
         return weighted_embs

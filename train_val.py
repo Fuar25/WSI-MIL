@@ -47,7 +47,7 @@ def train_slide_encoder(model:nn.Module,
         pbar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{epochs}')
         for data, label, _ in pbar:
             optimizer.zero_grad()
-            data, label = {'features': data.to(device)}, label.to(device)
+            data, label = data.to(device), label.to(device)
             logits = model(data)
             loss = criterion(logits, label)
             loss.backward()
@@ -86,7 +86,7 @@ def test_slide_encoder(model: nn.Module,
     with torch.no_grad():
         pbar = tqdm(test_dataloader, desc=f'Evaluating')
         for data, label, _ in pbar:
-            data, label = {'features': data.to(device)}, label.to(device)
+            data, label = data.to(device), label.to(device)
             logits = model(data)
             probs = nn.Sigmoid()(logits)
             loss = criterion(logits, label)
@@ -107,7 +107,7 @@ def T_SNE_visualization(model:nn.Module, dataset: Union[NPYDataset, NPYDataset_w
 
     with torch.no_grad():
         for data, label, score in dataloader:
-            slide_emb = model.slide_encoder({'features': data}, device=device)
+            slide_emb = model.slide_encoder(data, device=device)
             all_slide_emb.append(slide_emb.cpu().numpy())
             all_labels.append(int(label.cpu().numpy().item()))
             all_scores.append(float(score.cpu().numpy().item()))
@@ -132,7 +132,7 @@ def main():
     # root = '/home/william/Desktop/gml/MyCode/features_wtih_raw_coords'
     root = '/mnt/gml/PD-L1/previous/features/cpath_feature/01'
     csv_path = '/home/william/Desktop/gml/ALL_with_score.csv'
-    npydataset = NPYDataset(root=root, csv_path=csv_path, score=False)
+    npydataset = NPYDataset(root=root, csv_path=csv_path, score=True)
     # npydataset = NPYDataset_with_dirname(root=root, csv_path=csv_path, score=True)
     indices = list(range(len(npydataset)))
     labels = npydataset.label_list
