@@ -132,7 +132,7 @@ def main():
     # root = '/home/william/Desktop/gml/MyCode/features_wtih_raw_coords'
     root = '/mnt/gml/PD-L1/previous/features/cpath_feature/01'
     csv_path = '/home/william/Desktop/gml/ALL_with_score.csv'
-    npydataset = NPYDataset(root=root, csv_path=csv_path, score=True)
+    npydataset = NPYDataset(root=root, csv_path=csv_path, score=False)
     # npydataset = NPYDataset_with_dirname(root=root, csv_path=csv_path, score=True)
     indices = list(range(len(npydataset)))
     labels = npydataset.label_list
@@ -142,7 +142,7 @@ def main():
     kf_AUC = []
 
     for kfold, (train_indices, test_indices) in enumerate(kf.split(indices, labels)):
-        model = ABMIL(feature_dim=768, n_heads=2, head_dim=512, dropout=0.2, hidden_dim=512, class_num=2, gated=True)
+        model = ABMIL(feature_dim=768, atte_emb_dim=256, hidden_dim=512, class_num=2)
         print(f"=============={kfold} fold begins!===============")
         best_model_state = train_slide_encoder(model, npydataset, device=device, epochs=10, train_indices=train_indices, patience=3)
         model.load_state_dict(best_model_state)
