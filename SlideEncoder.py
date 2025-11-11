@@ -1,6 +1,20 @@
+import torch
 from torch import nn
-from typing import Literal
 import torch.nn.functional as F
+
+class MeanMIL(nn.Module):
+    def __init__(self, input_feature_dim, hidden_dim, class_num):
+        super().__init__()
+        self.slide_encoder = MeanMIL_block(input_feature_dim, hidden_dim)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, 1 if class_num == 2 else class_num)
+        )
+
+    def forward(self, features):
+        slide_emb = self.slide_encoder(features)
+        logits = self.classifier(slide_emb)
+        return logits
 
 class ABMIL(nn.Module):
     def __init__(self, feature_dim, atte_emb_dim, hidden_dim, class_num):
@@ -14,13 +28,11 @@ class ABMIL(nn.Module):
             nn.Linear(hidden_dim, 1 if class_num==2 else class_num)
         )
 
-    def forward(self, x, which: Literal['logits', 'slide_emb'] = 'logits', device='cuda:1'):
-        slide_emb = self.slide_encoder(x)
+    def forward(self, features):
+        slide_emb = self.slide_encoder(features)
         logits = self.classifier(slide_emb)
-        if which == 'logits':
-            return  logits
-        else:
-            return slide_emb
+        return logits
+
 
 class ABMIL_block(nn.Module):
     def __init__(self, input_feature_dim, hidden_dim, atte_emb_dim):
@@ -47,3 +59,15 @@ class ABMIL_block(nn.Module):
         weighted_embs = attention_scores.T @ pre_embs
 
         return weighted_embs
+
+class MeanMIL_block(nn.Module):
+    def __init__(self, input_feature_dim, output_dim):
+        super().__init__()
+        self.pre_emb_layer = nn.Linear(input_feature_dim, output_dim)
+
+    def forward(self, bags):
+        bags = bags.squeeze(0)
+        pre_embs = self.pre_emb_layer(bags)
+        embs = torch.mean(pre_embs, dim=0, keepdim=True)
+
+        return embs
