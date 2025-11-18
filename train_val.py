@@ -56,13 +56,14 @@ def train_slide_encoder(model:nn.Module,
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
         pbar.close()
         val_auc = test_slide_encoder(model, dataset, test_indices=val_indices, device=device)
-        stop_counters += 1
         tqdm.write(f"EPOCH{epoch+1} finished, loss={total_loss / len(train_loader):.4f}, AUC={val_auc:.4f}")
 
         if val_auc > best_auc:
             best_model = model.state_dict()
             best_auc = val_auc
             stop_counters = 0
+        else:
+            stop_counters += 1
         if stop_counters >= patience:
             tqdm.write(f"Up to the patience, stop! Best AUC = {best_auc}")
             break
@@ -127,13 +128,68 @@ def T_SNE_visualization(model:nn.Module, dataset: Union[NPYDataset, NPYDataset_w
             ax.set_title(title)
         plt.show()
 
+def plot(model:nn.Module, dataset: Union[NPYDataset, NPYDataset_with_dirname], indices, title: Optional[str] = None, device:str = 'cuda:1'):
+    all_labels = []
+    all_preds = []
+    all_probs = []
+
+    subset = Subset(dataset, indices=indices)
+    dataloader = DataLoader(subset, batch_size=1, shuffle=False, num_workers=2)
+    model = model.to(device)
+
+    with torch.no_grad():
+        for data, label, score in dataloader:
+            data, label = data.to(device), label.to(device)
+            logits = model(data)
+            probs = nn.Sigmoid()(logits)
+            all_probs.append(probs.cpu().numpy().item())
+            all_labels.append(int(label.cpu().numpy().item()))
+            preds = (probs.item()) > 0.5
+            all_preds.append(preds)
+
+    from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+    import matplotlib.pyplot as plt
+
+    cm = confusion_matrix(all_labels, all_preds)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+    disp.plot()
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', linewidths=.5, cbar_kws={"shrink": .8})
+    plt.xlabel('Predicted label')
+    plt.ylabel('True label')
+    plt.title('Confusion Matrix')
+    plt.show()
+
+
+    from sklearn.metrics import roc_curve, auc, RocCurveDisplay
+    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+    roc_auc = auc(fpr, tpr)
+
+    fpr_smooth = np.linspace(0, 1, 1000)
+    tpr_smooth = np.interp(fpr_smooth, fpr, tpr)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr_smooth, tpr_smooth, color='darkblue', lw=3, label=f'AUC = {roc_auc:.2f}')
+    plt.plot([0, 1], [0, 1], 'k--', lw=2, label='Random')  # 对角线（随机猜测）
+
+    # 美化
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontsize=14, fontweight='bold')
+    plt.ylabel('True Positive Rate', fontsize=14, fontweight='bold')
+    plt.title('Receiver Operating Characteristic (ROC)', fontsize=16, fontweight='bold')
+    plt.legend(loc="lower right", fontsize=12, frameon=True, fancybox=True, shadow=True)
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.tight_layout()
+    plt.show()
+
 
 def main():
-    # root = '/home/william/Desktop/gml/MyCode/features_wtih_raw_coords'
-    root = '/mnt/gml/PD-L1/previous/features/cpath_feature/01'
+    root = '/home/william/Desktop/gml/GML/features_wtih_raw_coords'
+    # root = '/mnt/gml/PD-L1/previous/features/cpath_feature/01'
     csv_path = '/home/william/Desktop/gml/ALL_with_score.csv'
-    npydataset = NPYDataset(root=root, csv_path=csv_path, score=True)
-    # npydataset = NPYDataset_with_dirname(root=root, csv_path=csv_path, score=True)
+    # npydataset = NPYDataset(root=root, csv_path=csv_path, score=True)
+    npydataset = NPYDataset_with_dirname(root=root, csv_path=csv_path, score=True)
     indices = list(range(len(npydataset)))
     labels = npydataset.label_list
     device = "cuda:1" if torch.cuda.is_available() else "cpu"
@@ -144,7 +200,7 @@ def main():
     for kfold, (train_indices, test_indices) in enumerate(kf.split(indices, labels)):
         model = ABMIL(feature_dim=768, atte_emb_dim=256, hidden_dim=512, class_num=2)
         print(f"=============={kfold} fold begins!===============")
-        best_model_state = train_slide_encoder(model, npydataset, device=device, epochs=10, train_indices=train_indices, patience=3)
+        best_model_state = train_slide_encoder(model, npydataset, device=device, epochs=100, train_indices=train_indices, patience=10)
         model.load_state_dict(best_model_state)
         test_auc = test_slide_encoder(model, npydataset, device=device, test_indices=test_indices)
         kf_AUC.append(test_auc)
@@ -152,6 +208,9 @@ def main():
 
         # T_SNE_visualization(model, train_loader, title="Train", device=device)
         # T_SNE_visualization(model, val_loader, title="Test", device=device)
+
+        plot(model, npydataset, indices=test_indices, device=device)
+
     average_auc = sum(kf_AUC) / len(kf_AUC)
     print("\n")
     print(f"KFold Average AUC = {average_auc}")

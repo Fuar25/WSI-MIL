@@ -33,7 +33,6 @@ class ABMIL(nn.Module):
         logits = self.classifier(slide_emb)
         return logits
 
-
 class ABMIL_block(nn.Module):
     def __init__(self, input_feature_dim, hidden_dim, atte_emb_dim):
         super().__init__()

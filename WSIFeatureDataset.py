@@ -1,3 +1,4 @@
+import random
 from typing import Optional
 from torch import tensor as torch_tensor
 from torch import float32
@@ -39,7 +40,9 @@ class NPYDataset(Dataset):
         for patho_id, features_path in zip(self.patho_id_list, self.features_path_list):
             index = self.csv['file_name'] == patho_id
             if index.any():
+                # label = 0 if self.csv[index]['SCORE'].iloc[0] < 50 else 1
                 label = self.csv[index]['GT'].iloc[0]
+                # label = random.randint(0, 1)
                 new_label_list.append(label)
                 new_patho_id_list.append(patho_id)
                 new_features_path_list.append(features_path)
@@ -145,6 +148,75 @@ class NPYDataset_with_dirname(Dataset):
             score = torch_tensor([self.score_list[idx]], dtype=float32)
             return features, label, score
         return features, label
+
+# To adapt to the trident features
+class H5Dataset(Dataset):
+    def __init__(self, root):
+        self.root = root
+        self.features_path_list = []
+        self.label_list = []
+        self._get_all_path()
+        self._get_all_label()
+
+    def _get_all_path(self):
+        for class_name in os.listdir(self.root):
+            class_path = os.path.join(class_name, self.root)
+            for features_name in os.listdir(class_path):
+                features_path = os.path.join(class_path, features_name)
+                self.features_path_list.append(features_path)
+
+    def _get_all_label(self):
+        new_patho_id_list = []
+        new_features_path_list = []
+        new_label_list = []
+
+        for patho_id, features_path in zip(self.patho_id_list, self.features_path_list):
+            index = self.csv['file_name'] == patho_id
+            if index.any():
+                # label = 0 if self.csv[index]['SCORE'].iloc[0] < 50 else 1
+                label = self.csv[index]['GT'].iloc[0]
+                # label = random.randint(0, 1)
+                new_label_list.append(label)
+                new_patho_id_list.append(patho_id)
+                new_features_path_list.append(features_path)
+
+        self.patho_id_list = new_patho_id_list
+        self.label_list = new_label_list
+        self.features_path_list = new_features_path_list
+
+
+    def _get_all_scores(self):
+        new_score_list = []
+        new_patho_id_list = []
+        new_features_path_list = []
+        new_label_list = []
+
+        for patho_id, features_path, label in zip(self.patho_id_list, self.features_path_list, self.label_list):
+            index = self.csv['file_name'] == patho_id
+            if index.any():
+                score = self.csv[index]['SCORE'].iloc[0]
+                new_score_list.append(score)
+                new_patho_id_list.append(patho_id)
+                new_features_path_list.append(features_path)
+                new_label_list.append(label)
+
+        self.patho_id_list = new_patho_id_list
+        self.label_list = new_label_list
+        self.features_path_list = new_features_path_list
+        return new_score_list
+
+    def __len__(self):
+        return len(self.features_path_list)
+
+    def __getitem__(self, idx):
+        features = torch_tensor(np.load(self.features_path_list[idx]), dtype=float32)
+        label = torch_tensor([self.label_list[idx]], dtype=float32)
+        if self.score_list is not None :
+            score = torch_tensor([self.score_list[idx]], dtype=float32)
+            return features, label, score
+        return features, label
+
+
 
 if __name__ == '__main__':
     root = '/mnt/gml/PD-L1/previous/features/cpath_feature'
