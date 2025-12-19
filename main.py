@@ -102,7 +102,7 @@ if __name__ == "__main__":
 
     sys.argv = [
         "main",
-        "--mode", "train",
+        "--mode", "cv",
         '--folds', "5"
     ]
     
