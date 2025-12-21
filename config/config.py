@@ -15,8 +15,8 @@ class RunTimeConfig:
     
     # For 'h5' dataset (directory-based, each directory is a class)
     data_paths: Optional[Dict[str, str]] = field(default_factory=lambda: {
-        'positive': '/mnt/gml/GML/Experiments/Experiment3/MALT/10x_256px_0px_overlap/slide_features_chief',
-        'negative': '/mnt/gml/GML/Experiments/Experiment3/Reactive/10x_256px_0px_overlap/slide_features_chief'
+        'positive': '/mnt/6T/GML/Experiments/Experiment3/MALT/10x_256px_0px_overlap/slide_features_chief',
+        'negative': '/mnt/6T/GML/Experiments/Experiment3/Reactive/10x_256px_0px_overlap/slide_features_chief'
     })
     feature_key: str = 'features'
     binary_mode: bool = True
@@ -34,7 +34,7 @@ class RunTimeConfig:
     # General
     epochs: int = 30
     batch_size: int = 1
-    learning_rate: float = 0.0004
+    learning_rate: float = 0.0005
     weight_decay: float = 1e-5
     seed: int = 42
     device: str = 'cuda'  # Use 'cpu' if CUDA compatibility issues
@@ -50,6 +50,8 @@ class RunTimeConfig:
     # ==================== Logging & Saving ====================
     save_dir: str = './experiments'
     save_best_only: bool = True  # Only save best models based on validation loss
+    log_test_results: bool = True  # Whether to log test results to CSV
+    test_results_csv: str = 'test_results.csv'  # Filename for test results CSV
 
 runtime_config = RunTimeConfig()
 

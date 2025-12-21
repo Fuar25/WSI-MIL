@@ -7,6 +7,7 @@ from sklearn.model_selection import KFold
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 import numpy as np
+import pandas as pd
 import time
 
 class Trainer:
@@ -21,31 +22,31 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
+        with tqdm(loader, desc="  Training one Epoch", unit="batch", leave=False) as pbar:
+            for features, label, _ in pbar:
+                features = features.to(self.device)
+                label = label.to(self.device)
 
-        for i, (features, label) in enumerate(loader):
-            features = features.to(self.device)
-            label = label.to(self.device)
+                optimizer.zero_grad()
+                logits, _ = model(features)
 
-            optimizer.zero_grad()
-            logits, _ = model(features)
+                if self.config.num_classes == 1:
+                    loss = criterion(logits.view(-1), label)
+                    preds = (torch.sigmoid(logits) > 0.5).float().view(-1)
+                else:
+                    loss = criterion(logits, label.long())
+                    preds = torch.argmax(logits, dim=1)
 
-            if self.config.num_classes == 1:
-                loss = criterion(logits.view(-1), label)
-                preds = (torch.sigmoid(logits) > 0.5).float().view(-1)
-            else:
-                loss = criterion(logits, label.long())
-                preds = torch.argmax(logits, dim=1)
+                loss.backward()
+                optimizer.step()
 
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item() * features.size(0)
-            correct += (preds == label).sum().item()
-            total += features.size(0)
-
+                total_loss += loss.item() * features.size(0)
+                correct += (preds == label).sum().item()
+                total += features.size(0)
+        
         return total_loss / total, correct / total
 
-    def _evaluate_with_auc(self, model, loader, criterion):
+    def _evaluate_with_auc(self, model, loader, criterion, return_details=False):
         """Evaluate model and compute AUC for binary/multi-class classification"""
         model.eval()
         total_loss = 0
@@ -53,9 +54,10 @@ class Trainer:
         total = 0
         all_labels = []
         all_probs = []
+        all_sample_ids = []
         
         with torch.no_grad():
-            for features, label in loader:
+            for features, label, sample_ids in loader:
                 features = features.to(self.device)
                 label = label.to(self.device)
                 
@@ -77,6 +79,8 @@ class Trainer:
                     # Store labels and probabilities (keep multi-class probs as matrix)
                     all_labels.extend(label.cpu().numpy())
                     all_probs.extend(probs.cpu().numpy())
+                
+                all_sample_ids.extend(sample_ids)
                     
                 total_loss += loss.item() * features.size(0)
                 correct += (preds == label).sum().item()
@@ -106,6 +110,8 @@ class Trainer:
             print(f"Probs shape: {all_probs.shape}, range: [{all_probs.min():.4f}, {all_probs.max():.4f}]")
             auc = 0.0
             
+        if return_details:
+            return avg_loss, accuracy, auc, {'sample_ids': all_sample_ids, 'probs': all_probs, 'labels': all_labels}
         return avg_loss, accuracy, auc
 
 
@@ -136,22 +142,22 @@ class Trainer:
         os.makedirs(self.config.save_dir, exist_ok=True)
         
         epoch_start_time = time.time()
-        with tqdm(range(self.config.best_epochs), desc="Epochs", unit="epoch", dynamic_ncols=True) as epoch_pbar:
-            for epoch in epoch_pbar:
-                train_loss, train_acc = self._train_epoch(model, train_loader, criterion, optimizer)
-                
-                epoch_time = time.time() - epoch_start_time
-                avg_time_per_epoch = epoch_time / (epoch + 1)
-                remaining_epochs = self.config.epochs - epoch - 1
-                eta_seconds = avg_time_per_epoch * remaining_epochs
-                eta_min = int(eta_seconds // 60)
-                eta_sec = int(eta_seconds % 60)
-                
-                epoch_pbar.set_postfix({
-                    "train_loss": f"{train_loss:.4f}",
-                    "train_acc": f"{train_acc:.4f}",
-                    "ETA": f"{eta_min}:{eta_sec:02d}"
-                })
+        epoch_pbar = tqdm(range(self.config.best_epochs), desc="Epochs", unit="epoch", leave=False)
+        for epoch in epoch_pbar:
+            train_loss, train_acc = self._train_epoch(model, train_loader, criterion, optimizer)
+
+            epoch_time = time.time() - epoch_start_time
+            avg_time_per_epoch = epoch_time / (epoch + 1)
+            remaining_epochs = self.config.epochs - epoch - 1
+            eta_seconds = avg_time_per_epoch * remaining_epochs
+            eta_min = int(eta_seconds // 60)
+            eta_sec = int(eta_seconds % 60)
+
+            epoch_pbar.set_postfix({
+                "train_loss": f"{train_loss:.4f}",
+                "train_acc": f"{train_acc:.4f}",
+                "ETA": f"{eta_min}:{eta_sec:02d}"
+            })
         
         # Save final model
         model_path = os.path.join(self.config.save_dir, 'model_deployment.pth')
@@ -183,103 +189,135 @@ class Trainer:
         all_indices = np.arange(len(self.dataset))
         fold_generator = list(enumerate(kfold.split(all_indices)))
         
-        with tqdm(fold_generator, desc="Folds", unit="fold", dynamic_ncols=True) as fold_pbar:
-            for fold, (train_val_ids, test_ids) in fold_pbar:
-                fold_pbar.set_description(f"Fold {fold+1}/{k_folds}")
+        all_fold_results_dfs = []
+        
+        for fold, (train_val_ids, test_ids) in fold_generator:
+            print(f"\n{'='*70}")
+            print(f"Fold {fold + 1} Start!")
+            print(f"{'='*70}")
+            
+            # Further split train_val into train and validation
+            train_val_size = len(train_val_ids)
+            val_size = int(train_val_size * self.config.val_ratio)
+            train_size = train_val_size - val_size
+            
+            # Shuffle and split
+            np.random.seed(self.config.seed + fold)
+            np.random.shuffle(train_val_ids)
+            train_ids = train_val_ids[:train_size]
+            val_ids = train_val_ids[train_size:]
+            
+            train_subset = Subset(self.dataset, train_ids)
+            val_subset = Subset(self.dataset, val_ids)
+            test_subset = Subset(self.dataset, test_ids)
+            
+            train_loader = DataLoader(train_subset, batch_size=self.config.batch_size, shuffle=True)
+            val_loader = DataLoader(val_subset, batch_size=self.config.batch_size, shuffle=False)
+            test_loader = DataLoader(test_subset, batch_size=self.config.batch_size, shuffle=False)
+            
+            print(f"  Fold {fold+1}: Train={len(train_subset)}, Val={len(val_subset)}, Test={len(test_subset)}\n")
+            
+            # Initialize model
+            model = self.model(
+                input_dim=self.config.input_dim,
+                hidden_dim=self.config.hidden_dim,
+                num_classes=self.config.num_classes,
+                n_heads=self.config.n_heads,
+                dropout=self.config.dropout,
+                gated=self.config.gated
+            ).to(self.device)
+            
+            optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate, weight_decay=self.config.weight_decay)
+            
+            if self.config.num_classes == 1:
+                criterion = nn.BCEWithLogitsLoss()
+            else:
+                criterion = nn.CrossEntropyLoss()
                 
-                # Further split train_val into train and validation
-                train_val_size = len(train_val_ids)
-                val_size = int(train_val_size * self.config.val_ratio)
-                train_size = train_val_size - val_size
-                
-                # Shuffle and split
-                np.random.seed(self.config.seed + fold)
-                np.random.shuffle(train_val_ids)
-                train_ids = train_val_ids[:train_size]
-                val_ids = train_val_ids[train_size:]
-                
-                train_subset = Subset(self.dataset, train_ids)
-                val_subset = Subset(self.dataset, val_ids)
-                test_subset = Subset(self.dataset, test_ids)
-                
-                train_loader = DataLoader(train_subset, batch_size=self.config.batch_size, shuffle=True)
-                val_loader = DataLoader(val_subset, batch_size=self.config.batch_size, shuffle=False)
-                test_loader = DataLoader(test_subset, batch_size=self.config.batch_size, shuffle=False)
-                
-                print(f"\n  Fold {fold+1}: Train={len(train_subset)}, Val={len(val_subset)}, Test={len(test_subset)}")
-                
-                # Initialize model
-                model = self.model(
-                    input_dim=self.config.input_dim,
-                    hidden_dim=self.config.hidden_dim,
-                    num_classes=self.config.num_classes,
-                    n_heads=self.config.n_heads,
-                    dropout=self.config.dropout,
-                    gated=self.config.gated
-                ).to(self.device)
-                
-                optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate, weight_decay=self.config.weight_decay)
-                
-                if self.config.num_classes == 1:
-                    criterion = nn.BCEWithLogitsLoss()
-                else:
-                    criterion = nn.CrossEntropyLoss()
+            best_val_loss = float('inf')
+            best_epoch = 0
+            patience_counter = 0
+            fold_start_time = time.time()
+            
+            # Training loop with early stopping
+            with tqdm(range(self.config.epochs), desc=f"  Epochs", leave=False, unit="epoch") as epoch_pbar:
+                for epoch in epoch_pbar:
+                    train_loss, train_acc = self._train_epoch(model, train_loader, criterion, optimizer)
+                    val_loss, val_acc, val_auc = self._evaluate_with_auc(model, val_loader, criterion)
                     
-                best_val_loss = float('inf')
-                best_epoch = 0
-                patience_counter = 0
-                fold_start_time = time.time()
-                
-                # Training loop with early stopping
-                with tqdm(range(self.config.epochs), desc=f"  Epochs", leave=False, unit="epoch", dynamic_ncols=True) as epoch_pbar:
-                    for epoch in epoch_pbar:
-                        train_loss, train_acc = self._train_epoch(model, train_loader, criterion, optimizer)
-                        val_loss, val_acc, val_auc = self._evaluate_with_auc(model, val_loader, criterion)
-                        
-                        epoch_time = time.time() - fold_start_time
-                        avg_time_per_epoch = epoch_time / (epoch + 1)
-                        remaining_epochs = self.config.epochs - epoch - 1
-                        eta_seconds = avg_time_per_epoch * remaining_epochs
-                        eta_min = int(eta_seconds // 60)
-                        eta_sec = int(eta_seconds % 60)
-                        
-                        epoch_pbar.set_postfix({
-                            "train_loss": f"{train_loss:.4f}",
-                            "val_loss": f"{val_loss:.4f}",
-                            "val_auc": f"{val_auc:.4f}",
-                            "ETA": f"{eta_min}:{eta_sec:02d}"
-                        })
-                        
-                        # Early stopping based on validation loss
-                        if val_loss < best_val_loss:
-                            best_val_loss = val_loss
-                            best_epoch = epoch + 1
-                            patience_counter = 0
-                            # Save best checkpoint
-                            best_checkpoint_path = os.path.join(self.config.save_dir, f'model_fold_{fold+1}_best.pth')
-                            torch.save(model.state_dict(), best_checkpoint_path)
-                        else:
-                            patience_counter += 1
-                            if patience_counter >= self.config.patience:
-                                print(f"\n  Early stopping at epoch {epoch+1}. Best epoch: {best_epoch}")
-                                break
-                
-                # Load best checkpoint and evaluate on test set
-                model.load_state_dict(torch.load(best_checkpoint_path))
-                test_loss, test_acc, test_auc = self._evaluate_with_auc(model, test_loader, criterion)
-                
-                fold_results.append({
-                    'fold': fold + 1,
-                    'best_epoch': best_epoch,
-                    'val_loss': best_val_loss,
-                    'test_loss': test_loss,
-                    'test_acc': test_acc,
-                    'test_auc': test_auc
+                    epoch_time = time.time() - fold_start_time
+                    avg_time_per_epoch = epoch_time / (epoch + 1)
+                    remaining_epochs = self.config.epochs - epoch - 1
+                    eta_seconds = avg_time_per_epoch * remaining_epochs
+                    eta_min = int(eta_seconds // 60)
+                    eta_sec = int(eta_seconds % 60)
+                    
+                    epoch_pbar.set_postfix({
+                        "train_loss": f"{train_loss:.4f}",
+                        "val_loss": f"{val_loss:.4f}",
+                        "val_auc": f"{val_auc:.4f}",
+                        "ETA": f"{eta_min}:{eta_sec:02d}"
+                    })
+                    
+                    # Early stopping based on validation loss
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_epoch = epoch + 1
+                        patience_counter = 0
+                        # Save best checkpoint
+                        best_checkpoint_path = os.path.join(self.config.save_dir, f'model_fold_{fold+1}_best.pth')
+                        torch.save(model.state_dict(), best_checkpoint_path)
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= self.config.patience:
+                            tqdm.write(f"\n  Early stopping at epoch {epoch+1}. Best epoch: {best_epoch}")
+                            break
+            
+            # Load best checkpoint and evaluate on test set
+            model.load_state_dict(torch.load(best_checkpoint_path))
+            test_loss, test_acc, test_auc, test_details = self._evaluate_with_auc(model, test_loader, criterion, return_details=True)
+            
+            if self.config.log_test_results:
+                results_df = pd.DataFrame({
+                    'filename': test_details['sample_ids'],
+                    'label': test_details['labels'],
                 })
                 
-                print(f"  Fold {fold+1} Results: Best Epoch={best_epoch}, Test Loss={test_loss:.4f}, Test Acc={test_acc:.4f}, Test AUC={test_auc:.4f}")
+                if self.config.num_classes == 1:
+                    probs = test_details['probs']
+                    results_df['prob_negative'] = 1 - probs
+                    results_df['prob_positive'] = probs
+                    results_df['prediction'] = (probs > 0.5).astype(int)
+                else:
+                    probs = test_details['probs']
+                    for c in range(self.config.num_classes):
+                        results_df[f'prob_class_{c}'] = probs[:, c]
+                    results_df['prediction'] = np.argmax(probs, axis=1)
+                        
+                csv_path = os.path.join(self.config.save_dir, f'fold_{fold+1}_{self.config.test_results_csv}')
+                results_df.to_csv(csv_path, index=False)
+                print(f"  Test results saved to {csv_path}")
+                
+                all_fold_results_dfs.append(results_df)
+            
+            fold_results.append({
+                'fold': fold + 1,
+                'best_epoch': best_epoch,
+                'val_loss': best_val_loss,
+                'test_loss': test_loss,
+                'test_acc': test_acc,
+                'test_auc': test_auc
+            })
+            
+            print(f"  Fold {fold+1} Results: Best Epoch={best_epoch}, Test Loss={test_loss:.4f}, Test Acc={test_acc:.4f}, Test AUC={test_auc:.4f}")
             
         total_time = time.time() - cv_start_time
+        
+        if self.config.log_test_results and all_fold_results_dfs:
+            full_df = pd.concat(all_fold_results_dfs, ignore_index=True)
+            full_csv_path = os.path.join(self.config.save_dir, f'full_{self.config.test_results_csv}')
+            full_df.to_csv(full_csv_path, index=False)
+            print(f"  Full test results saved to {full_csv_path}")
         
         # Aggregate results
         test_aucs = [r['test_auc'] for r in fold_results]

@@ -9,7 +9,7 @@ class LinearProbe(BaseModel):
     def __init__(self, 
                  input_dim: int, 
                  num_classes: int = 1, 
-                 dropout: float = 0.0, 
+                 dropout: float = 0,
                  **kwargs):
         """
         Args:

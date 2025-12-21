@@ -62,6 +62,7 @@ class WSIFeatureDataset(BaseDataset):
                         label = label_map[sample_id]
                         self.data.append({
                             'sample_id': sample_id,
+                            'filename': filename,
                             'feature_path': file_path,
                             'label': label
                         })
@@ -69,7 +70,7 @@ class WSIFeatureDataset(BaseDataset):
     def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
         item = self.data[idx]
         
         # Load features
@@ -79,7 +80,7 @@ class WSIFeatureDataset(BaseDataset):
         # Handle label
         label = torch.tensor(item['label']).float() # Assuming binary/regression. Change to long() for multi-class
         
-        return features, label
+        return features, label, item['filename']
 
     def get_metadata(self, idx: int) -> Dict[str, Any]:
         return self.data[idx]
@@ -142,6 +143,7 @@ class H5FeatureDataset(BaseDataset):
                         file_path = os.path.join(root, filename)
                         self.data.append({
                             'sample_id': filename.replace('.h5', ''),
+                            'filename': filename,
                             'feature_path': file_path,
                             'label': label,
                             'class_name': cls_name
@@ -150,7 +152,7 @@ class H5FeatureDataset(BaseDataset):
     def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
         item = self.data[idx]
         
         with h5py.File(item['feature_path'], 'r') as f:
@@ -166,7 +168,7 @@ class H5FeatureDataset(BaseDataset):
             # Multi-class: return as long (integer class index)
             label = torch.tensor(item['label']).long()
         
-        return features, label
+        return features, label, item['filename']
 
     def get_metadata(self, idx: int) -> Dict[str, Any]:
         return self.data[idx]

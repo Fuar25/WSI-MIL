@@ -95,11 +95,22 @@ def main():
         raise ValueError(f"{args.mode} mode has not been supported!")
 
 if __name__ == "__main__":
-    runtime_config.model_name = 'linear_probe'
-    runtime_config.input_dim = 768
-    runtime_config.save_dir = "/mnt/gml/GML/Experiments/Experiment3/weights"
-    runtime_config.best_epochs = 20
-
+    
+    runtime_config.data_paths = {
+        'positive': '/z3/home/srtp/GML/Experiments/Experiment3/MALT/20x_256px_0px_overlap/features_uni_v2',
+        'negative': '/z3/home/srtp/GML/Experiments/Experiment3/Reactive/20x_256px_0px_overlap/features_uni_v2'
+    }
+    runtime_config.save_dir = "/z3/home/srtp/Experiments/Experiment3/results"
+    runtime_config.device = "cuda:2"
+    
+    runtime_config.model_name = 'abmil'
+    runtime_config.input_dim = 1536
+    runtime_config.hidden_dim = 512
+    runtime_config.n_heads = 4
+    runtime_config.dropout = 0
+    runtime_config.gated = True
+    runtime_config.seed = 42
+    
     sys.argv = [
         "main",
         "--mode", "cv",
