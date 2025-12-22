@@ -11,8 +11,9 @@ from core.abmil_visualizer import ABMIL_Visualizer
 def main():
     parser = argparse.ArgumentParser(description="WSI Training with TRIDENT Integration")
     parser.add_argument('--mode', type=str, default='cv',
-                        help='Mode: train (full dataset for deployment), cv (cross-validation), vis (visualization)')
+                        help='Mode: train (full dataset for deployment), cv (cross-validation), vis (visualization), search (hyperparameter search)')
     parser.add_argument('--folds', type=int, default=None, help='Number of folds for cross-validation (overrides runtime_config)')
+    parser.add_argument('--n_trials', type=int, default=20, help='Number of trials for hyperparameter search')
     parser.add_argument('--model_path', type=str, default=None, help='Path to model for visualization')
     parser.add_argument('--wsi_path', type=str, default=None, help='Path to WSI file for visualization')
     
@@ -73,6 +74,16 @@ def main():
         k_folds = args.folds if args.folds is not None else runtime_config.k_folds
         trainer.cross_validate(k_folds=k_folds)
 
+    elif args.mode == 'search':
+        try:
+            from core.hpo import HyperParameterOptimizer
+        except ImportError:
+            print("Error: 'optuna' is required for hyperparameter search. Please install it via 'pip install optuna'.")
+            return
+
+        optimizer = HyperParameterOptimizer(model_class, dataset, runtime_config)
+        optimizer.optimize(n_trials=args.n_trials)
+
     elif args.mode == 'vis':
         if args.model_path is None:
             print("Please provide --model_path for visualization.")
@@ -97,10 +108,10 @@ def main():
 if __name__ == "__main__":
     
     runtime_config.data_paths = {
-        'positive': '/z3/home/srtp/GML/Experiments/Experiment3/MALT/20x_256px_0px_overlap/features_uni_v2',
-        'negative': '/z3/home/srtp/GML/Experiments/Experiment3/Reactive/20x_256px_0px_overlap/features_uni_v2'
+        'positive': '/mnt/6T/GML/Experiments/Experiment3/MALT/20x_256px_0px_overlap/features_uni_v2',
+        'negative': '/mnt/6T/GML/Experiments/Experiment3/Reactive/20x_256px_0px_overlap/features_uni_v2'
     }
-    runtime_config.save_dir = "/z3/home/srtp/Experiments/Experiment3/results"
+    runtime_config.save_dir = "/mnt/6T/GML/Experiments/Experiment3/results"
     runtime_config.device = "cuda:2"
     
     runtime_config.model_name = 'abmil'
@@ -113,8 +124,8 @@ if __name__ == "__main__":
     
     sys.argv = [
         "main",
-        "--mode", "cv",
-        '--folds', "5"
+        "--mode", "search",
+        '--n_trials', "50"
     ]
     
     main()
