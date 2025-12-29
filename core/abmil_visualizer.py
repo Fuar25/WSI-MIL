@@ -3,7 +3,7 @@ from typing import Optional, Dict
 import h5py
 import torch
 from config.config import VisualizationConfig
-from models import ABMIL
+from models import MILModel
 
 class ABMIL_Visualizer:
     def __init__(self, config: VisualizationConfig, wsi_path: str):
@@ -45,7 +45,7 @@ class ABMIL_Visualizer:
         from trident.segmentation_models import segmentation_model_factory
         if self._segmentation_model is None:
             self._segmentation_model = segmentation_model_factory(
-                self.config.segmentation_model_name
+                self.config.segmentation.segmentation_model_name
             )
         return self._segmentation_model
 
@@ -54,20 +54,25 @@ class ABMIL_Visualizer:
         from trident.patch_encoder_models import encoder_factory as patch_encoder_factory
         if self._patch_encoder is None:
             self._patch_encoder = patch_encoder_factory(
-                self.config.patch_encoder_name
+                self.config.feature_extraction.patch_encoder_name
             )
         return self._patch_encoder
 
     @property
     def abmil_encoder(self):
         if self._abmil_encoder is None:
-            self._abmil_encoder = ABMIL(
-                input_dim=self.config.input_dim,
-                hidden_dim=self.config.hidden_dim,
-                num_classes=self.config.num_classes,
-                n_heads=self.config.n_heads,
-                dropout=self.config.dropout,
-                gated=self.config.gated
+            # Use the generic MILModel wrapper
+            # Note: Visualizer currently assumes ABMIL-like attention behavior
+            self._abmil_encoder = MILModel(
+                model_name=self.config.model.model_name, # Use configured model name
+                input_dim=self.config.model.input_dim,
+                hidden_dim=self.config.model.hidden_dim,
+                num_classes=self.config.model.num_classes,
+                n_heads=self.config.model.n_heads,
+                dropout=self.config.model.dropout,
+                gated=self.config.model.gated,
+                pretrained=self.config.model.pretrained,
+                checkpoint_path=self.config.abmil_weights_path # Load trained weights for vis
             ).to(self.device)
         return self._abmil_encoder
 
@@ -94,9 +99,9 @@ class ABMIL_Visualizer:
         if self._coords_path is not None and not recompute:
             return self._coords_path
 
-        target_mag = target_mag or self.config.target_mag
-        patch_size = patch_size or self.config.patch_size
-        overlap = overlap or self.config.overlap
+        target_mag = target_mag or self.config.patch_extraction.target_mag
+        patch_size = patch_size or self.config.patch_extraction.patch_size
+        overlap = overlap or self.config.patch_extraction.overlap
 
         print("Extracting patch coords...")
         self._coords_path = self.wsi.extract_tissue_coords(
@@ -196,9 +201,9 @@ class ABMIL_Visualizer:
             )
 
         # Use config defaults if not specified
-        vis_level = vis_level if vis_level is not None else self.config.vis_level
-        num_top_patches = num_top_patches if num_top_patches is not None else self.config.num_top_patches
-        normalize = normalize if normalize is not None else self.config.normalize_heatmap
+        vis_level = vis_level if vis_level is not None else self.config.display.vis_level
+        num_top_patches = num_top_patches if num_top_patches is not None else self.config.display.num_top_patches
+        normalize = normalize if normalize is not None else self.config.display.normalize_heatmap
         output_dir = output_dir or str(self.job_dir)
 
         print(f"Generating heatmap for {self.wsi_name}...")

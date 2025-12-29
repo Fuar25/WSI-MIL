@@ -15,7 +15,13 @@ class Trainer:
         self.model = model
         self.dataset = dataset
         self.config = config
-        self.device = torch.device(config.device)
+        
+        # Create convenient access to nested configs
+        self.model_cfg = config.model
+        self.training_cfg = config.training
+        self.logging_cfg = config.logging
+        
+        self.device = torch.device(self.training_cfg.device)
         
     def _train_epoch(self, model, loader, criterion, optimizer):
         model.train()
@@ -28,13 +34,20 @@ class Trainer:
                 label = label.to(self.device)
 
                 optimizer.zero_grad()
-                logits, _ = model(features)
+                
+                # Pass label and criterion to model to allow internal loss calculation (e.g. CLAM instance loss)
+                logits, loss, _ = model(features, label=label, loss_fn=criterion)
 
-                if self.config.num_classes == 1:
-                    loss = criterion(logits.view(-1), label)
+                if loss is None:
+                    # Fallback to external loss calculation if model didn't return one
+                    if self.model_cfg.num_classes == 1:
+                        loss = criterion(logits.view(-1), label)
+                    else:
+                        loss = criterion(logits, label.long())
+
+                if self.model_cfg.num_classes == 1:
                     preds = (torch.sigmoid(logits) > 0.5).float().view(-1)
                 else:
-                    loss = criterion(logits, label.long())
                     preds = torch.argmax(logits, dim=1)
 
                 loss.backward()
@@ -61,10 +74,16 @@ class Trainer:
                 features = features.to(self.device)
                 label = label.to(self.device)
                 
-                logits, _ = model(features)
+                # Pass label and criterion to model (though loss is not used for backprop here, it might be logged)
+                logits, loss, _ = model(features, label=label, loss_fn=criterion)
                 
-                if self.config.num_classes == 1:
-                    loss = criterion(logits.view(-1), label)
+                if loss is None:
+                    if self.model_cfg.num_classes == 1:
+                        loss = criterion(logits.view(-1), label)
+                    else:
+                        loss = criterion(logits, label.long())
+                
+                if self.model_cfg.num_classes == 1:
                     probs = torch.sigmoid(logits).view(-1)
                     preds = (probs > 0.5).float()
                     
@@ -94,7 +113,7 @@ class Trainer:
         all_probs = np.array(all_probs)
         
         try:
-            if self.config.num_classes == 1:
+            if self.model_cfg.num_classes == 1:
                 # Binary classification: labels should be 0/1, probs is a 1D array
                 all_labels_int = all_labels.astype(int)
                 auc = roc_auc_score(all_labels_int, all_probs)
@@ -121,34 +140,34 @@ class Trainer:
         """
         print(f"Training on full dataset ({len(self.dataset)} samples) for deployment...")
         
-        train_loader = DataLoader(self.dataset, batch_size=self.config.batch_size, shuffle=True)
+        train_loader = DataLoader(self.dataset, batch_size=self.training_cfg.batch_size, shuffle=True)
         
         model = self.model(
-            input_dim=self.config.input_dim,
-            hidden_dim=self.config.hidden_dim,
-            num_classes=self.config.num_classes,
-            n_heads=self.config.n_heads,
-            dropout=self.config.dropout,
-            gated=self.config.gated
+            input_dim=self.model_cfg.input_dim,
+            hidden_dim=self.model_cfg.hidden_dim,
+            num_classes=self.model_cfg.num_classes,
+            n_heads=self.model_cfg.n_heads,
+            dropout=self.model_cfg.dropout,
+            gated=self.model_cfg.gated
         ).to(self.device)
         
-        optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate, weight_decay=self.config.weight_decay)
+        optimizer = optim.Adam(model.parameters(), lr=self.training_cfg.learning_rate, weight_decay=self.training_cfg.weight_decay)
         
-        if self.config.num_classes == 1:
+        if self.model_cfg.num_classes == 1:
             criterion = nn.BCEWithLogitsLoss()
         else:
             criterion = nn.CrossEntropyLoss()
             
-        os.makedirs(self.config.save_dir, exist_ok=True)
+        os.makedirs(self.logging_cfg.save_dir, exist_ok=True)
         
         epoch_start_time = time.time()
-        epoch_pbar = tqdm(range(self.config.best_epochs), desc="Epochs", unit="epoch", leave=False)
+        epoch_pbar = tqdm(range(self.training_cfg.best_epochs), desc="Epochs", unit="epoch", leave=False)
         for epoch in epoch_pbar:
             train_loss, train_acc = self._train_epoch(model, train_loader, criterion, optimizer)
 
             epoch_time = time.time() - epoch_start_time
             avg_time_per_epoch = epoch_time / (epoch + 1)
-            remaining_epochs = self.config.epochs - epoch - 1
+            remaining_epochs = self.training_cfg.epochs - epoch - 1
             eta_seconds = avg_time_per_epoch * remaining_epochs
             eta_min = int(eta_seconds // 60)
             eta_sec = int(eta_seconds % 60)
@@ -160,7 +179,7 @@ class Trainer:
             })
         
         # Save final model
-        model_path = os.path.join(self.config.save_dir, 'model_deployment.pth')
+        model_path = os.path.join(self.logging_cfg.save_dir, 'model_deployment.pth')
         torch.save(model.state_dict(), model_path)
         
         total_time = time.time() - epoch_start_time
@@ -178,9 +197,9 @@ class Trainer:
         - Evaluate best checkpoint on test set
         - Compute AUC for each fold on test set
         """
-        kfold = KFold(n_splits=k_folds, shuffle=True, random_state=self.config.seed)
+        kfold = KFold(n_splits=k_folds, shuffle=True, random_state=self.training_cfg.seed)
         fold_results = []
-        os.makedirs(self.config.save_dir, exist_ok=True)
+        os.makedirs(self.logging_cfg.save_dir, exist_ok=True)
         
         print(f"Starting {k_folds}-Fold Cross-Validation...")
         print(f"Each fold: Test set = 1/{k_folds}, Train:Val = 9:1")
@@ -198,11 +217,11 @@ class Trainer:
             
             # Further split train_val into train and validation
             train_val_size = len(train_val_ids)
-            val_size = int(train_val_size * self.config.val_ratio)
+            val_size = int(train_val_size * self.training_cfg.val_ratio)
             train_size = train_val_size - val_size
             
             # Shuffle and split
-            np.random.seed(self.config.seed + fold)
+            np.random.seed(self.training_cfg.seed + fold)
             np.random.shuffle(train_val_ids)
             train_ids = train_val_ids[:train_size]
             val_ids = train_val_ids[train_size:]
@@ -211,25 +230,25 @@ class Trainer:
             val_subset = Subset(self.dataset, val_ids)
             test_subset = Subset(self.dataset, test_ids)
             
-            train_loader = DataLoader(train_subset, batch_size=self.config.batch_size, shuffle=True)
-            val_loader = DataLoader(val_subset, batch_size=self.config.batch_size, shuffle=False)
-            test_loader = DataLoader(test_subset, batch_size=self.config.batch_size, shuffle=False)
+            train_loader = DataLoader(train_subset, batch_size=self.training_cfg.batch_size, shuffle=True)
+            val_loader = DataLoader(val_subset, batch_size=self.training_cfg.batch_size, shuffle=False)
+            test_loader = DataLoader(test_subset, batch_size=self.training_cfg.batch_size, shuffle=False)
             
             print(f"  Fold {fold+1}: Train={len(train_subset)}, Val={len(val_subset)}, Test={len(test_subset)}\n")
             
             # Initialize model
             model = self.model(
-                input_dim=self.config.input_dim,
-                hidden_dim=self.config.hidden_dim,
-                num_classes=self.config.num_classes,
-                n_heads=self.config.n_heads,
-                dropout=self.config.dropout,
-                gated=self.config.gated
+                input_dim=self.model_cfg.input_dim,
+                hidden_dim=self.model_cfg.hidden_dim,
+                num_classes=self.model_cfg.num_classes,
+                n_heads=self.model_cfg.n_heads,
+                dropout=self.model_cfg.dropout,
+                gated=self.model_cfg.gated
             ).to(self.device)
             
-            optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate, weight_decay=self.config.weight_decay)
+            optimizer = optim.Adam(model.parameters(), lr=self.training_cfg.learning_rate, weight_decay=self.training_cfg.weight_decay)
             
-            if self.config.num_classes == 1:
+            if self.model_cfg.num_classes == 1:
                 criterion = nn.BCEWithLogitsLoss()
             else:
                 criterion = nn.CrossEntropyLoss()
@@ -240,14 +259,14 @@ class Trainer:
             fold_start_time = time.time()
             
             # Training loop with early stopping
-            with tqdm(range(self.config.epochs), desc=f"  Epochs", leave=False, unit="epoch") as epoch_pbar:
+            with tqdm(range(self.training_cfg.epochs), desc=f"  Epochs", leave=False, unit="epoch") as epoch_pbar:
                 for epoch in epoch_pbar:
                     train_loss, train_acc = self._train_epoch(model, train_loader, criterion, optimizer)
                     val_loss, val_acc, val_auc = self._evaluate_with_auc(model, val_loader, criterion)
                     
                     epoch_time = time.time() - fold_start_time
                     avg_time_per_epoch = epoch_time / (epoch + 1)
-                    remaining_epochs = self.config.epochs - epoch - 1
+                    remaining_epochs = self.training_cfg.epochs - epoch - 1
                     eta_seconds = avg_time_per_epoch * remaining_epochs
                     eta_min = int(eta_seconds // 60)
                     eta_sec = int(eta_seconds % 60)
@@ -265,11 +284,11 @@ class Trainer:
                         best_epoch = epoch + 1
                         patience_counter = 0
                         # Save best checkpoint
-                        best_checkpoint_path = os.path.join(self.config.save_dir, f'model_fold_{fold+1}_best.pth')
+                        best_checkpoint_path = os.path.join(self.logging_cfg.save_dir, f'model_fold_{fold+1}_best.pth')
                         torch.save(model.state_dict(), best_checkpoint_path)
                     else:
                         patience_counter += 1
-                        if patience_counter >= self.config.patience:
+                        if patience_counter >= self.training_cfg.patience:
                             tqdm.write(f"\n  Early stopping at epoch {epoch+1}. Best epoch: {best_epoch}")
                             break
             
@@ -277,24 +296,24 @@ class Trainer:
             model.load_state_dict(torch.load(best_checkpoint_path))
             test_loss, test_acc, test_auc, test_details = self._evaluate_with_auc(model, test_loader, criterion, return_details=True)
             
-            if self.config.log_test_results:
+            if self.logging_cfg.log_test_results:
                 results_df = pd.DataFrame({
                     'filename': test_details['sample_ids'],
                     'label': test_details['labels'],
                 })
                 
-                if self.config.num_classes == 1:
+                if self.model_cfg.num_classes == 1:
                     probs = test_details['probs']
                     results_df['prob_negative'] = 1 - probs
                     results_df['prob_positive'] = probs
                     results_df['prediction'] = (probs > 0.5).astype(int)
                 else:
                     probs = test_details['probs']
-                    for c in range(self.config.num_classes):
+                    for c in range(self.model_cfg.num_classes):
                         results_df[f'prob_class_{c}'] = probs[:, c]
                     results_df['prediction'] = np.argmax(probs, axis=1)
                         
-                csv_path = os.path.join(self.config.save_dir, f'fold_{fold+1}_{self.config.test_results_csv}')
+                csv_path = os.path.join(self.logging_cfg.save_dir, f'fold_{fold+1}_{self.logging_cfg.test_results_csv}')
                 results_df.to_csv(csv_path, index=False)
                 print(f"  Test results saved to {csv_path}")
                 

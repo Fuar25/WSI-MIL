@@ -3,7 +3,7 @@ import sys
 
 from config.config import runtime_config, visualization_config
 from data_loader.dataset import WSIFeatureDataset, H5FeatureDataset
-from models.mil_models import ABMIL
+from models.mil_models import MILModel
 from models.linear_probe import LinearProbe
 from core.trainer import Trainer
 from core.abmil_visualizer import ABMIL_Visualizer
@@ -20,14 +20,14 @@ def main():
     args = parser.parse_args()
 
     # Initialize Dataset
-    if runtime_config.dataset_type == 'h5':
-        if runtime_config.data_paths is None:
-            print("Error: runtime_config.data_paths must be provided for H5 dataset.")
+    if runtime_config.dataset.dataset_type == 'h5':
+        if runtime_config.dataset.data_paths is None:
+            print("Error: runtime_config.dataset.data_paths must be provided for H5 dataset.")
             return
         dataset = H5FeatureDataset(
-            data_paths=runtime_config.data_paths,
-            feature_key=runtime_config.feature_key,
-            binary_mode=runtime_config.binary_mode
+            data_paths=runtime_config.dataset.data_paths,
+            feature_key=runtime_config.dataset.feature_key,
+            binary_mode=runtime_config.dataset.binary_mode
         )
         
         # Auto-configure num_classes based on dataset
@@ -35,35 +35,40 @@ def main():
         # For multi-class (>2 classes), use num_classes=number of classes
         num_dataset_classes = len(dataset.classes)
         if num_dataset_classes == 2:
-            runtime_config.num_classes = 1  # Binary classification
+            runtime_config.model.num_classes = 1  # Binary classification
             print(f"Auto-configured num_classes to 1 (binary classification) for {num_dataset_classes} classes.")
         else:
-            # runtime_config.num_classes = num_dataset_classes
-            # print(f"Auto-configured num_classes to {runtime_config.num_classes} (multi-class).")
+            # runtime_config.model.num_classes = num_dataset_classes
+            # print(f"Auto-configured num_classes to {runtime_config.model.num_classes} (multi-class).")
             raise ValueError(f"{num_dataset_classes} classes has not been supported!")
 
-    elif runtime_config.dataset_type == 'h5':
+    elif runtime_config.dataset.dataset_type == 'npy':
         dataset = WSIFeatureDataset(
-            root_dir=runtime_config.root_dir,
-            csv_path=runtime_config.csv_path,
-            label_col=runtime_config.label_col,
-            sample_id_col=runtime_config.sample_id_col,
-            feature_suffix=runtime_config.feature_suffix
+            root_dir=runtime_config.dataset.root_dir,
+            csv_path=runtime_config.dataset.csv_path,
+            label_col=runtime_config.dataset.label_col,
+            sample_id_col=runtime_config.dataset.sample_id_col,
+            feature_suffix=runtime_config.dataset.feature_suffix
         )
     else:
-        raise TypeError(f"{runtime_config.dataset_type} type has not been supported!")
+        raise TypeError(f"{runtime_config.dataset.dataset_type} type has not been supported!")
     
     if len(dataset) == 0:
         print("Error: No data found.")
         return
 
     # Initialize Trainer
-    if runtime_config.model_name == 'abmil':
-        model_class = ABMIL
-    elif runtime_config.model_name == 'linear_probe':
+    if runtime_config.model.model_name == 'linear_probe':
         model_class = LinearProbe
     else:
-        raise ValueError(f"Model {runtime_config.model_name} not supported.")
+        # Assume it's a MIL-Lab model
+        # Update mil_lab_model_name if model_name is a specific MIL-Lab model string
+        # If model_name is generic 'abmil', we keep mil_lab_model_name as 'abmil' (or whatever is in config)
+        # If model_name is specific (e.g. 'clam_sb', 'abmil.base...'), we update mil_lab_model_name
+        if runtime_config.model.model_name != 'abmil': 
+             runtime_config.model.mil_lab_model_name = runtime_config.model.model_name
+        
+        model_class = MILModel
 
     trainer = Trainer(model_class, dataset, runtime_config)
     
@@ -71,7 +76,7 @@ def main():
         trainer.train_full_dataset()
         
     elif args.mode == 'cv':
-        k_folds = args.folds if args.folds is not None else runtime_config.k_folds
+        k_folds = args.folds if args.folds is not None else runtime_config.training.k_folds
         trainer.cross_validate(k_folds=k_folds)
 
     elif args.mode == 'search':
@@ -107,25 +112,28 @@ def main():
 
 if __name__ == "__main__":
     
-    runtime_config.data_paths = {
-        'positive': '/mnt/6T/GML/Experiments/Experiment3/MALT/20x_256px_0px_overlap/features_uni_v2',
-        'negative': '/mnt/6T/GML/Experiments/Experiment3/Reactive/20x_256px_0px_overlap/features_uni_v2'
+    runtime_config.dataset.data_paths = {
+        'positive': '/mnt/6T/GML/Experiments/Experiment3/MALT/10x_256px_0px_overlap/slide_features_feather-univ2',
+        'negative': '/mnt/6T/GML/Experiments/Experiment3/Reactive/10x_256px_0px_overlap/slide_features_feather-univ2'
     }
-    runtime_config.save_dir = "/mnt/6T/GML/Experiments/Experiment3/results"
-    runtime_config.device = "cuda:2"
-    
-    runtime_config.model_name = 'abmil'
-    runtime_config.input_dim = 1536
-    runtime_config.hidden_dim = 512
-    runtime_config.n_heads = 4
-    runtime_config.dropout = 0
-    runtime_config.gated = True
-    runtime_config.seed = 42
+
+    runtime_config.logging.save_dir = "/mnt/6T/GML/Experiments/Experiment3/results"
+    runtime_config.training.device = "cuda:2"
+    runtime_config.training.seed = 42
+
+    runtime_config.model.model_name = 'abmil.base.uni.pc108-24k'
+    runtime_config.model.input_dim = 512
+    runtime_config.model.hidden_dim = 512
+    runtime_config.model.n_heads = 4
+    runtime_config.model.dropout = 0.2
+    runtime_config.model.gated = True
+
     
     sys.argv = [
         "main",
-        "--mode", "search",
-        '--n_trials', "50"
+        "--mode", "cv",
+        "--folds", "5",
+        '--n_trials', "100"
     ]
     
     main()

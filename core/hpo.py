@@ -18,37 +18,37 @@ class HyperParameterOptimizer:
         
         # Enforce deterministic behavior for fair comparison
         # Reset seeds at the start of each trial so that the same params yield the same result
-        seed = config.seed
+        seed = config.training.seed
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
         
         # Define search space
-        config.learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-        config.weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
-        config.dropout = trial.suggest_float("dropout", 0.1, 0.5)
-        config.hidden_dim = trial.suggest_categorical("hidden_dim", [256, 512])
-        config.n_heads = trial.suggest_categorical("n_heads", [1, 4, 8])
+        config.training.learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
+        config.training.weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
+        config.model.dropout = trial.suggest_float("dropout", 0, 0.5)
+        config.model.hidden_dim = trial.suggest_categorical("hidden_dim", [256, 512, 768, 1024])
+        config.model.n_heads = trial.suggest_categorical("n_heads", [1, 4, 8])
         
-        # Update save direc tory for this trial to avoid overwriting
-        config.save_dir = f"{self.base_config.save_dir}/trial_{trial.number}"
-        config.log_test_results = False # Disable detailed logging for speed/storage
+        # Update save directory for this trial to avoid overwriting
+        config.logging.save_dir = f"{self.base_config.logging.save_dir}/trial_{trial.number}"
+        config.logging.log_test_results = False # Disable detailed logging for speed/storage
         
         # Initialize Trainer
         trainer = Trainer(self.model_class, self.dataset, config)
         
         # Run Cross-Validation (using fewer folds for speed if needed, but keeping robust)
         # We can use the average Test AUC as the metric to maximize
-        fold_results = trainer.cross_validate(k_folds=config.k_folds)
+        fold_results = trainer.cross_validate(k_folds=config.training.k_folds)
         
         # Calculate average Test AUC
         avg_test_auc = np.mean([r['test_auc'] for r in fold_results])
         avg_test_acc = np.mean([r['test_acc'] for r in fold_results])
 
         # Log results to CSV
-        log_path = os.path.join(self.base_config.save_dir, "hpo_log.csv")
-        os.makedirs(self.base_config.save_dir, exist_ok=True)
+        log_path = os.path.join(self.base_config.logging.save_dir, "hpo_log.csv")
+        os.makedirs(self.base_config.logging.save_dir, exist_ok=True)
 
         # Prepare log data
         log_data = {

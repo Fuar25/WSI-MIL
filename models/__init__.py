@@ -1,2 +1,2 @@
-from .mil_models import ABMIL
+from .mil_models import MILModel
 from .linear_probe import LinearProbe

@@ -1,13 +1,14 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict
 
+
 @dataclass
-class RunTimeConfig:
-    # ==================== Dataset Configuration ====================
+class DatasetConfig:
+    """Dataset configuration parameters"""
     dataset_type: str = 'h5'  # 'npy' or 'h5'
     
     # For 'npy' dataset (CSV-based)
-    root_dir: str = './data/ctranspath'  # Root directory for NPY files
+    root_dir: str = './data/ctranspath'
     csv_path: str = './data/labels.csv'
     label_col: str = 'GT'
     sample_id_col: str = 'file_name'
@@ -21,70 +22,112 @@ class RunTimeConfig:
     feature_key: str = 'features'
     binary_mode: bool = True
 
-    # ==================== Model Configuration ====================
-    model_name: str = 'abmil'  # 'abmil' or 'linear_probe'
+
+@dataclass
+class ModelConfig:
+    """Model architecture configuration parameters"""
+    model_name: str = 'abmil'  # 'abmil', 'linear_probe', or MIL-Lab model string
+    
+    # MIL-Lab integration
+    use_mil_lab: bool = True
+    mil_lab_model_name: str = 'abmil'  # Specific model name for MIL-Lab builder (e.g. 'clam_sb', 'transmil')
+    pretrained: bool = False
+    checkpoint_path: str = ''
+    
+    # Model architecture parameters (ignored if loading specific pretrained model string)
     input_dim: int = 1536
     hidden_dim: int = 512
     num_classes: int = 1  # Will be auto-set for H5 dataset
     dropout: float = 0.2
     n_heads: int = 1
     gated: bool = True
-    
-    # ==================== Training Configuration ====================
-    # General
+
+
+@dataclass
+class TrainingConfig:
+    """Training process configuration parameters"""
+    # General training
     epochs: int = 30
     batch_size: int = 1
     learning_rate: float = 0.0005
     weight_decay: float = 1e-5
     seed: int = 42
-    device: str = 'cuda'  # Use 'cpu' if CUDA compatibility issues
-    patience: int = 5  # Number of epochs to wait for improvement before early stopping
+    device: str = 'cuda'
+    patience: int = 5  # Early stopping patience
     
-    # Cross-Validation specific
-    k_folds: int = 5  # Number of folds for cross-validation
-    val_ratio: float = 0.1  # Validation split ratio within each fold (train:val = 9:1)
+    # Cross-validation
+    k_folds: int = 5
+    val_ratio: float = 0.1
+    
+    # Full dataset training
+    best_epochs: int = 9
 
-    # Full dataset training specific
-    best_epochs = 9
 
-    # ==================== Logging & Saving ====================
+@dataclass
+class LoggingConfig:
+    """Logging and saving configuration parameters"""
     save_dir: str = './experiments'
-    save_best_only: bool = True  # Only save best models based on validation loss
-    log_test_results: bool = True  # Whether to log test results to CSV
-    test_results_csv: str = 'test_results.csv'  # Filename for test results CSV
+    save_best_only: bool = True
+    log_test_results: bool = True
+    test_results_csv: str = 'test_results.csv'
+
+
+@dataclass
+class RunTimeConfig:
+    """Main runtime configuration containing all sub-configurations"""
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+
 
 runtime_config = RunTimeConfig()
 
-@dataclass
-class VisualizationConfig:
-    """Configuration for ABMIL Visualizer pipeline"""
-    device: str = 'cuda'
-    abmil_weights_path: str = './experiments/model_deployment.pth'
-    job_dir: str = './visualization'
 
-    # Segmentation config
+@dataclass
+class SegmentationConfig:
+    """Tissue segmentation configuration"""
     segmentation_model_name: str = "grandqc"
 
-    # Patch extraction config
+
+@dataclass
+class PatchExtractionConfig:
+    """Patch extraction configuration"""
     target_mag: int = 20
     patch_size: int = 512
     overlap: int = 256
 
-    # Feature extraction config
+
+@dataclass
+class FeatureExtractionConfig:
+    """Feature extraction configuration"""
     patch_encoder_name: str = "uni_v2"
 
-    # Visualization config
+
+@dataclass
+class VisualizationDisplayConfig:
+    """Visualization display configuration"""
     vis_level: int = 1
     num_top_patches: int = 10
     normalize_heatmap: bool = True
 
-    # ==================== Model Configuration ====================
-    input_dim: int = 1536
-    hidden_dim: int = 512
-    num_classes: int = 1  # Will be auto-set for H5 dataset
-    dropout: float = 0.2
-    n_heads: int = 1
-    gated: bool = True
+
+@dataclass
+class VisualizationConfig:
+    """Configuration for ABMIL Visualizer pipeline"""
+    # General
+    device: str = 'cuda'
+    abmil_weights_path: str = './experiments/model_deployment.pth'
+    job_dir: str = './visualization'
+    
+    # Sub-configurations
+    segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
+    patch_extraction: PatchExtractionConfig = field(default_factory=PatchExtractionConfig)
+    feature_extraction: FeatureExtractionConfig = field(default_factory=FeatureExtractionConfig)
+    display: VisualizationDisplayConfig = field(default_factory=VisualizationDisplayConfig)
+    
+    # Model configuration (reuse from runtime)
+    model: ModelConfig = field(default_factory=ModelConfig)
 
 
 visualization_config = VisualizationConfig()
