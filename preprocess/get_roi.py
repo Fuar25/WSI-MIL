@@ -8,6 +8,11 @@ import pyvips
 import openslide
 from opensdpc import OpenSdpc
 
+# --- Libvips Performance Tuning ---
+# Control concurrency (set to number of cores you want to use, or 0 for auto)
+# pyvips.cache_set_max(0)  # Uncomment to disable cache (reduces memory)
+# pyvips.concurrency_set(4)  # Uncomment to limit threads (reduces CPU load)
+
 
 # --- Helper Functions ---
 
@@ -75,8 +80,10 @@ def load_json_bbox(json_path):
 def save_visualization(slide, bbox, save_path):
     """Saves a thumbnail with drawn bounding box."""
     try:
-        # Check if slide has get_thumbnail method with integer argument (SDPC)
-        if hasattr(slide, 'level_downsamples'):
+        # Check if slide is OpenSlide (standard) or SDPC (custom)
+        # OpenSlide objects also have 'level_downsamples', so we must check type explicitly
+        if not isinstance(slide, openslide.OpenSlide):
+            # Assume SDPC or other custom format that takes int level
             thumb_raw = slide.get_thumbnail(3)  # Level 3
             
             # Convert PIL Image to numpy if needed
@@ -89,7 +96,7 @@ def save_visualization(slide, bbox, save_path):
             
             scale = slide.level_downsamples[3]
         else:
-            # OpenSlide format
+            # OpenSlide format - takes size tuple
             thumb_raw = slide.get_thumbnail((2048, 2048))
             
             # Convert PIL Image to numpy if needed
@@ -142,36 +149,41 @@ def save_visualization(slide, bbox, save_path):
         traceback.print_exc()
 
 
-def save_pyramid_tiff(img_np, save_path, target_mpp, scale_factor=1.0, 
+def save_pyramid_tiff(img_data, save_path, target_mpp, scale_factor=1.0, 
                       quality=75, bg_threshold=240, tile_size=256,
                       compression='jpeg'):
-    """Saves numpy array as pyramid TIFF using pyvips with JPEG compression.
+    """Saves image data as pyramid TIFF using pyvips.
     
-    Optimized for minimal file size with good visual quality.
+    Args:
+        img_data: numpy array or pyvips.Image
     """
-    h, w, c = img_np.shape
-
     print(f"\n  💾 Saving pyramid TIFF...")
-    print(f"     Input: {w} x {h} x {c}")
-    print(f"     Input memory: {img_np.nbytes / 1024 / 1024:.1f} MB")
-
+    
     try:
-        # Ensure contiguous array before creating vips image
-        if not img_np.flags['C_CONTIGUOUS']:
-            img_np = np.ascontiguousarray(img_np)
+        # 1. Create vips image from input
+        if isinstance(img_data, np.ndarray):
+            h, w, c = img_data.shape
+            print(f"     Input (Numpy): {w} x {h} x {c}")
+            print(f"     Input memory: {img_data.nbytes / 1024 / 1024:.1f} MB")
+            
+            if not img_data.flags['C_CONTIGUOUS']:
+                img_data = np.ascontiguousarray(img_data)
+                
+            vips_img = pyvips.Image.new_from_memory(img_data.data, w, h, c, 'uchar')
+            if c == 3:
+                vips_img = vips_img.copy(interpretation='srgb')
+            del img_data # Free numpy memory
+            
+        elif isinstance(img_data, pyvips.Image):
+            vips_img = img_data
+            c = vips_img.bands
+            print(f"     Input (PyVips): {vips_img.width} x {vips_img.height} x {c}")
+        else:
+            raise ValueError(f"Unsupported image type: {type(img_data)}")
 
-        # Create vips image from numpy
-        print(f"     Creating vips image...")
-        vips_img = pyvips.Image.new_from_memory(img_np.data, w, h, c, 'uchar')
-        if c == 3:
-            vips_img = vips_img.copy(interpretation='srgb')
-        
-        print(f"     ✓ Vips image created: {vips_img.width} x {vips_img.height}")
-        
-        # Free numpy array memory early (vips has its own copy now)
-        del img_np
+        print(f"     ✓ Vips image ready: {vips_img.width} x {vips_img.height}")
 
-        # Resize if needed (only if scale difference is significant)
+        # 2. Resize
         if abs(scale_factor - 1.0) > 0.01:
             print(f"     Resizing with scale factor {scale_factor:.3f}...")
             vips_img = vips_img.resize(scale_factor, kernel='lanczos3')
@@ -179,32 +191,27 @@ def save_pyramid_tiff(img_np, save_path, target_mpp, scale_factor=1.0,
             if vips_img.format != 'uchar':
                 vips_img = vips_img.cast('uchar')
         
-        # Background cleaning AFTER resize (faster on smaller image)
-        # Note: For JPEG, white areas compress well anyway, so this is optional
+        # 3. Background cleaning (Pure Vips implementation)
+        # Note: This step adds computational overhead. Set bg_threshold=None to disable.
         if bg_threshold is not None:
             print(f"     🧹 Cleaning background (Threshold > {bg_threshold})...")
-            # Convert to numpy only for the cleaning operation
-            img_array = vips_img.numpy()
-            if c == 3:
-                mask = np.min(img_array, axis=2) > bg_threshold
-                img_array[mask] = 255
+            # Create mask: if all channels > threshold, it's background
+            if vips_img.bands >= 3:
+                # Universal implementation using ifthenelse (works on all libvips versions)
+                bands = vips_img.bandsplit()
+                min_val = bands[0]
+                for band in bands[1:]:
+                    # Pixel-wise min: if min_val < band, keep min_val, else use band
+                    min_val = (min_val < band).ifthenelse(min_val, band)
+                mask = min_val > bg_threshold
             else:
-                img_array[img_array > bg_threshold] = 255
+                mask = vips_img > bg_threshold
             
-            # Recreate vips image from cleaned array
-            vips_img = pyvips.Image.new_from_memory(
-                img_array.data, 
-                img_array.shape[1], 
-                img_array.shape[0], 
-                c, 
-                'uchar'
-            )
-            if c == 3:
-                vips_img = vips_img.copy(interpretation='srgb')
-            del img_array  # Free memory
+            # Apply mask: if background, set to 255, else keep original
+            vips_img = mask.ifthenelse(255, vips_img)
             print(f"     ✓ Background cleaned")
 
-        # Optimized JPEG compression parameters for minimal file size
+        # 4. Save
         print(f"     Compression: JPEG Q={quality}, Pyramid, Tiled {tile_size}x{tile_size}")
         print(f"     Writing to disk (this may take a while)...")
         
@@ -216,19 +223,18 @@ def save_pyramid_tiff(img_np, save_path, target_mpp, scale_factor=1.0,
             tile_width=tile_size,
             tile_height=tile_size,
             pyramid=True,
-            subifd=False,           # QuPath compatibility
+            subifd=False,
             bigtiff=True,
-            xres=10000.0 / target_mpp,
-            yres=10000.0 / target_mpp,
+            xres=1000.0 / target_mpp,
+            yres=1000.0 / target_mpp,
             resunit='cm',
         )
 
-        # Check output file
+        # Check output
         if Path(save_path).exists():
             output_size_mb = Path(save_path).stat().st_size / 1024 / 1024
-            # Calculate compression ratio based on final vips image dimensions
             original_size_mb = (vips_img.width * vips_img.height * c) / 1024 / 1024
-            compression_ratio = original_size_mb / output_size_mb
+            compression_ratio = original_size_mb / output_size_mb if output_size_mb > 0 else 0
             
             print(f"  ✅ Saved successfully!")
             print(f"     Output file: {output_size_mb:.1f} MB")
@@ -245,12 +251,91 @@ def save_pyramid_tiff(img_np, save_path, target_mpp, scale_factor=1.0,
         return False
 
 
+def process_openslide_optimized(wsi_path, bbox, save_path, padding, target_mpp, manual_mpp, 
+                                visualize, quality, bg_threshold, tile_size, compression):
+    """Optimized processing for OpenSlide supported formats using pure libvips pipeline."""
+    print(f"  🚀 Using optimized libvips pipeline for OpenSlide...")
+    
+    try:
+        # 1. Open image directly with pyvips (lazy loading)
+        # access='sequential' is usually faster for single pass, but 'random' is safer for ROI extraction
+        # Let's try default (random) first as we are extracting a specific region
+        vips_src = pyvips.Image.new_from_file(str(wsi_path))
+        
+        # Get dimensions
+        dims = (vips_src.width, vips_src.height)
+        src_mpp = manual_mpp if manual_mpp else 0.25 # TODO: Try to read from vips metadata if possible
+        
+        print(f"  🔬 Slide info: {dims[0]} x {dims[1]} pixels")
+        print(f"  📏 Source MPP: {src_mpp:.3f}, Target MPP: {target_mpp:.3f}")
+        
+        # 2. Visualization (Optional - requires separate OpenSlide handle or vips thumbnail)
+        if visualize:
+            try:
+                # Use a temporary OpenSlide handle just for the thumbnail to keep logic simple
+                # Or use vips thumbnail
+                thumb = vips_src.thumbnail_image(2048)
+                thumb_np = np.ndarray(buffer=thumb.write_to_memory(),
+                                      dtype=np.uint8,
+                                      shape=[thumb.height, thumb.width, thumb.bands])
+                
+                # Calculate scale for drawing bbox
+                vis_scale = dims[0] / thumb.width
+                
+                vis = cv2.cvtColor(thumb_np, cv2.COLOR_RGB2BGR)
+                minx, miny, maxx, maxy = bbox
+                pt1 = (int(minx / vis_scale), int(miny / vis_scale))
+                pt2 = (int(maxx / vis_scale), int(maxy / vis_scale))
+                cv2.rectangle(vis, pt1, pt2, (0, 255, 0), 4)
+                
+                vis_path = str(save_path).replace('.tiff', '_vis.png')
+                cv2.imwrite(vis_path, vis)
+                print(f"  🖼️  Visualization saved: {Path(vis_path).name}")
+            except Exception as e:
+                print(f"  ⚠️  Visualization failed: {e}")
+
+        # 3. Calculate ROI
+        minx, miny, maxx, maxy = bbox
+        x = max(0, int(minx) - padding)
+        y = max(0, int(miny) - padding)
+        w = min(int(maxx) + padding, dims[0]) - x
+        h = min(int(maxy) + padding, dims[1]) - y
+        
+        print(f"  🎯 Extracting region (Lazy):")
+        print(f"     With padding ({padding}px): {w} x {h} pixels")
+        print(f"     Position: x={x}, y={y}")
+        
+        # 4. Extract Area (Lazy)
+        roi = vips_src.extract_area(x, y, w, h)
+        
+        # Remove alpha if present
+        if roi.bands == 4:
+            roi = roi.extract_band(0, n=3)
+            
+        # 5. Calculate scale factor
+        scale_factor = src_mpp / target_mpp
+        if abs(scale_factor - 1.0) > 0.01:
+            new_w = int(w * scale_factor)
+            new_h = int(h * scale_factor)
+            print(f"  🔄 Will resample to: {new_w} x {new_h} (x{scale_factor:.2f})")
+            
+        # 6. Save (Triggers the pipeline)
+        return save_pyramid_tiff(roi, save_path, target_mpp, scale_factor, 
+                                quality=quality, bg_threshold=bg_threshold, 
+                                tile_size=tile_size, compression=compression)
+                                
+    except Exception as e:
+        print(f"  ❌ Optimized processing failed: {e}")
+        traceback.print_exc()
+        return False
+
+
 def extract_and_save_roi_from_json(wsi_path, json_path, save_path,
                                    padding=1000,
                                    target_mpp=0.25, manual_mpp=None,
                                    visualize=False, 
                                    quality=75,  # 降低默认值
-                                   bg_threshold=240, 
+                                   bg_threshold=None, 
                                    tile_size=256,  # 降低默认值
                                    compression='jpeg',  # 新增参数
                                    **kwargs):
@@ -258,18 +343,28 @@ def extract_and_save_roi_from_json(wsi_path, json_path, save_path,
     wsi_path, save_path = Path(wsi_path), Path(save_path)
     print(f"\n🔹 Processing: {wsi_path.name}")
 
+    # Load ROI bounding box from JSON first
+    bbox = load_json_bbox(json_path)
+    if bbox is None:
+        print("  ❌ No valid ROI found in JSON.")
+        return False
+
+    # Check if we can use optimized path (OpenSlide supported files)
+    # SDPC files must use the old path
+    is_sdpc = wsi_path.suffix.lower() == '.sdpc'
+    
+    if not is_sdpc:
+        return process_openslide_optimized(wsi_path, bbox, save_path, padding, target_mpp, 
+                                          manual_mpp, visualize, quality, bg_threshold, 
+                                          tile_size, compression)
+
+    # --- Fallback / SDPC Legacy Path ---
     try:
         slide, dims = get_slide_handler(wsi_path)
         src_mpp = manual_mpp if manual_mpp else 0.25
 
         print(f"  🔬 Slide info: {dims[0]} x {dims[1]} pixels")
         print(f"  📏 Source MPP: {src_mpp:.3f}, Target MPP: {target_mpp:.3f}")
-
-        # Load ROI bounding box from JSON
-        bbox = load_json_bbox(json_path)
-        if bbox is None:
-            print("  ❌ No valid ROI found in JSON.")
-            return False
 
         if visualize:
             save_visualization(slide, bbox, str(save_path).replace('.tiff', '_vis.png'))
@@ -386,17 +481,17 @@ if __name__ == "__main__":
     # )
 
     extract_and_save_roi_from_json(
-        wsi_path="/mnt/6T/GML/DATA/WSI/MALT-Lymphoma/B2018-06208/ToRegister/B2018-06208B-cd3.sdpc",
-        json_path="/mnt/6T/GML/DATA/WSI/MALT-Lymphoma/B2018-06208/ToRegister/B2018-06208B-cd3.json",
-        save_path="/mnt/6T/GML/DATA/WSI/MALT-Lymphoma/B2018-06208/ToRegister/B2018-06208B-cd3.tiff",
+        wsi_path="/home/william/Downloads/B2018-06208B-cd3.svs",
+        json_path="/home/william/Downloads/B2018-06208B-cd3.json",
+        save_path="/home/william/Downloads/B2018-06208B-cd3.tiff",
         target_mpp=0.104074,
         manual_mpp=0.104074,
-        padding=0,
+        padding=1000,
         visualize=True,
         compression='jpeg',
-        quality=85,            
+        quality=80,
         tile_size=512,        
-        bg_threshold=240
+        bg_threshold=None
     )   
 
 
