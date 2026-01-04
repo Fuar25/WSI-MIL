@@ -1,6 +1,9 @@
 import os
 import json
 import traceback
+import logging
+import time
+from datetime import datetime
 from pathlib import Path
 import cv2
 import numpy as np
@@ -15,6 +18,37 @@ from opensdpc import OpenSdpc
 
 
 # --- Helper Functions ---
+
+def setup_logging(output_dir, log_name="roi_extraction.log"):
+    """Setup logging configuration with both file and console handlers."""
+    log_path = Path(output_dir) / log_name
+    
+    # Create logger
+    logger = logging.getLogger('roi_extraction')
+    logger.setLevel(logging.DEBUG)
+    
+    # Remove existing handlers
+    logger.handlers = []
+    
+    # File handler - detailed logs
+    fh = logging.FileHandler(log_path, mode='a', encoding='utf-8')
+    fh.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    fh.setFormatter(file_formatter)
+    logger.addHandler(fh)
+    
+    # Console handler - important info only
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(message)s')
+    ch.setFormatter(console_formatter)
+    logger.addHandler(ch)
+    
+    return logger
+
 
 def get_slide_handler(path):
     """Abstracts slide opening for SDPC and OpenSlide."""
@@ -435,75 +469,183 @@ def extract_and_save_roi_from_json(wsi_path, json_path, save_path,
         return False
 
 
-def batch_process_folder(input_dir, output_dir, file_pattern="*.sdpc", **kwargs):
-    """Batch process WSI files and their JSON annotations from the same folder."""
+def batch_process_folder(input_dir, output_dir, 
+                        file_pattern="*.sdpc",
+                        recursive=True,
+                        padding=1000,
+                        target_mpp=0.25, 
+                        manual_mpp=None,
+                        visualize=False,
+                        quality=75,
+                        bg_threshold=None,
+                        tile_size=256,
+                        compression='jpeg'):
+    """Batch process WSI files and their JSON annotations.
+    
+    Args:
+        input_dir: Root directory to search for WSI files
+        output_dir: Directory to save extracted ROIs
+        file_pattern: File pattern to match (e.g., "*.sdpc", "*.svs")
+        recursive: If True, recursively search subdirectories
+        padding: Padding around ROI in pixels
+        target_mpp: Target microns per pixel for output
+        manual_mpp: Manual override for source MPP (None = auto-detect)
+        visualize: Save thumbnail with ROI overlay
+        quality: JPEG quality (1-100)
+        bg_threshold: Background threshold for cleaning (None = disable)
+        tile_size: Tile size for pyramid TIFF
+        compression: Compression method ('jpeg', 'deflate', etc.)
+    """
     input_dir, output_dir = Path(input_dir), Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
-
-    # Only search in the specified folder, no recursion
-    files = [f for f in input_dir.glob(file_pattern) if f.is_file()]
-    print(f"🚀 Batch Processing {len(files)} files from {input_dir}")
-
-    stats = {'ok': 0, 'fail': 0, 'skip': 0}
-
+    
+    # Setup logging
+    logger = setup_logging(output_dir)
+    
+    # Log session start
+    logger.info("="*80)
+    logger.info(f"🚀 Batch ROI Extraction Started")
+    logger.info(f"   Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"   Input Directory: {input_dir}")
+    logger.info(f"   Output Directory: {output_dir}")
+    logger.info(f"   File Pattern: {file_pattern}")
+    logger.info(f"   Recursive Search: {recursive}")
+    logger.info(f"   Parameters: padding={padding}, target_mpp={target_mpp}, ")
+    logger.info(f"               manual_mpp={manual_mpp}, quality={quality}, ")
+    logger.info(f"               tile_size={tile_size}, compression={compression}, ")
+    logger.info(f"               bg_threshold={bg_threshold}, visualize={visualize}")
+    logger.info("="*80)
+    
+    # Search for files (recursive or not)
+    search_func = input_dir.rglob if recursive else input_dir.glob
+    files = [f for f in search_func(file_pattern) if f.is_file()]
+    logger.info(f"\n📂 Found {len(files)} files matching pattern '{file_pattern}'")
+    
+    if not files:
+        logger.warning("⚠️  No files found. Exiting.")
+        return
+    
+    # Statistics
+    stats = {'ok': 0, 'fail': 0, 'skip_no_json': 0, 'skip_exists': 0}
+    start_time = time.time()
+    
     for i, wsi_file in enumerate(files, 1):
+        file_start_time = time.time()
+        
+        # Find matching JSON file (same name, same directory)
         json_file = wsi_file.with_suffix('.json')
-        out_path = output_dir / (wsi_file.stem + ".tiff")
-
-        if not json_file.exists():
-            print(f"\n[{i}/{len(files)}] ⚠️  Skipping {wsi_file.name} (No matching JSON)");
-            stats['skip'] += 1
-            continue
-        if out_path.exists():
-            print(f"\n[{i}/{len(files)}] ⏭️  Skipping {wsi_file.name} (Already exists)");
-            stats['skip'] += 1
-            continue
-
-        print(f"\n[{i}/{len(files)}] Processing {wsi_file.name}...")
-        if extract_and_save_roi_from_json(wsi_file, json_file, out_path, **kwargs):
-            stats['ok'] += 1
+        
+        # Determine output path (preserve relative structure if recursive)
+        if recursive:
+            rel_path = wsi_file.relative_to(input_dir)
+            out_path = output_dir / rel_path.parent / (wsi_file.stem + ".tiff")
+            out_path.parent.mkdir(exist_ok=True, parents=True)
         else:
+            out_path = output_dir / (wsi_file.stem + ".tiff")
+        
+        logger.info(f"\n{'─'*80}")
+        logger.info(f"[{i}/{len(files)}] Processing: {wsi_file.name}")
+        logger.info(f"   Source: {wsi_file}")
+        logger.info(f"   Output: {out_path}")
+        
+        # Check for JSON
+        if not json_file.exists():
+            logger.warning(f"   ⚠️  SKIPPED: No matching JSON file found")
+            logger.warning(f"   Expected: {json_file}")
+            stats['skip_no_json'] += 1
+            continue
+        
+        # Check if output already exists
+        if out_path.exists():
+            existing_size = out_path.stat().st_size / 1024 / 1024
+            logger.info(f"   ⏭️  SKIPPED: Output file already exists ({existing_size:.1f} MB)")
+            stats['skip_exists'] += 1
+            continue
+        
+        # Get input file size
+        input_size = wsi_file.stat().st_size / 1024 / 1024
+        logger.info(f"   📊 Input Size: {input_size:.1f} MB")
+        
+        # Process the slide
+        try:
+            success = extract_and_save_roi_from_json(
+                wsi_path=wsi_file,
+                json_path=json_file,
+                save_path=out_path,
+                padding=padding,
+                target_mpp=target_mpp,
+                manual_mpp=manual_mpp,
+                visualize=visualize,
+                quality=quality,
+                bg_threshold=bg_threshold,
+                tile_size=tile_size,
+                compression=compression
+            )
+            
+            processing_time = time.time() - file_start_time
+            
+            if success:
+                output_size = out_path.stat().st_size / 1024 / 1024
+                logger.info(f"   ✅ SUCCESS")
+                logger.info(f"   📦 Output Size: {output_size:.1f} MB")
+                logger.info(f"   ⏱️  Processing Time: {processing_time:.1f} seconds")
+                logger.info(f"   💾 Saved to: {out_path}")
+                stats['ok'] += 1
+            else:
+                logger.error(f"   ❌ FAILED: Processing returned False")
+                logger.error(f"   ⏱️  Time spent: {processing_time:.1f} seconds")
+                stats['fail'] += 1
+                
+        except Exception as e:
+            processing_time = time.time() - file_start_time
+            logger.error(f"   ❌ FAILED: {str(e)}")
+            logger.error(f"   ⏱️  Time spent: {processing_time:.1f} seconds")
+            logger.debug(f"   Stack trace:", exc_info=True)
             stats['fail'] += 1
-
-    print(f"\n🏁 Done. Success: {stats['ok']}, Failed: {stats['fail']}, Skipped: {stats['skip']}")
+    
+    # Final summary
+    total_time = time.time() - start_time
+    logger.info(f"\n{'='*80}")
+    logger.info(f"🏁 Batch Processing Complete")
+    logger.info(f"   Total Time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
+    logger.info(f"   ✅ Successful: {stats['ok']}")
+    logger.info(f"   ❌ Failed: {stats['fail']}")
+    logger.info(f"   ⏭️  Skipped (already exists): {stats['skip_exists']}")
+    logger.info(f"   ⚠️  Skipped (no JSON): {stats['skip_no_json']}")
+    logger.info(f"   📊 Total Files: {len(files)}")
+    if stats['ok'] > 0:
+        logger.info(f"   ⏱️  Average Time: {total_time/stats['ok']:.1f} seconds per file")
+    logger.info("="*80)
 
 
 if __name__ == "__main__":
-    # # 单文件处理示例
     # extract_and_save_roi_from_json(
-    #     wsi_path="/mnt/6T/GML/DATA/WSI/Reactive-Hyperplasia/B2023-36262/B2023-36262-D.sdpc",
-    #     json_path="/mnt/6T/GML/DATA/WSI/Reactive-Hyperplasia/B2023-36262/B2023-36262-D.json",
-    #     save_path="/mnt/6T/GML/DATA/WSI/Reactive-Hyperplasia/B2023-36262/B2023-36262-D.tiff",
-    #     target_mpp=0.104,
-    #     manual_mpp=0.104,
-    #     padding=2000,
-    #     visualize=True
-    # )
+    #     wsi_path="/home/william/Downloads/B2018-06208B-cd3.svs",
+    #     json_path="/home/william/Downloads/B2018-06208B-cd3.json",
+    #     save_path="/home/william/Downloads/B2018-06208B-cd3.tiff",
+    #     target_mpp=0.104074,
+    #     manual_mpp=0.104074,
+    #     padding=1000,
+    #     visualize=True,
+    #     compression='jpeg',
+    #     quality=80,
+    #     tile_size=512,        
+    #     bg_threshold=None
+    # )   
 
-    extract_and_save_roi_from_json(
-        wsi_path="/home/william/Downloads/B2018-06208B-cd3.svs",
-        json_path="/home/william/Downloads/B2018-06208B-cd3.json",
-        save_path="/home/william/Downloads/B2018-06208B-cd3.tiff",
-        target_mpp=0.104074,
-        manual_mpp=0.104074,
+
+    # 批量处理示例 - 递归搜索所有子文件夹
+    batch_process_folder(
+        input_dir="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/hasROI",
+        output_dir="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/hasROI",
+        file_pattern="*.sdpc",
+        recursive=True,      # 递归搜索子文件夹
+        target_mpp=0.104,
+        manual_mpp=0.104,
         padding=1000,
         visualize=True,
         compression='jpeg',
-        quality=80,
-        tile_size=512,        
-        bg_threshold=None
-    )   
-
-
-    # 批量处理示例 - SDPC和JSON在同一文件夹
-    # batch_process_folder(
-    #     input_dir="/mnt/6T/GML/DATA/WSI/MALT-Lymphoma/xsB2022-13516",
-    #     output_dir="/mnt/6T/GML/DATA/WSI/MALT-Lymphoma/xsB2022-13516",
-    #     file_pattern="*.sdpc",
-    #     target_mpp=0.104,
-    #     manual_mpp=0.104,
-    #     padding=2000,
-    #     visualize=True,
-    #     quality=80,        # 恢复为高质量
-    #     bg_threshold=240,  # 开启背景清洗
-    # )
+        quality=85,
+        tile_size=512,
+        bg_threshold=None,
+    )
