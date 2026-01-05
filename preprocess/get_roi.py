@@ -1,8 +1,10 @@
 import os
 import json
+import re
 import traceback
 import logging
 import time
+import gc
 from datetime import datetime
 from pathlib import Path
 import cv2
@@ -11,6 +13,7 @@ import pyvips
 import openslide
 from opensdpc import OpenSdpc
 
+MAX_MEMORY_GB = 48  # Maximum allowed memory for ROI extraction in GB
 # --- Libvips Performance Tuning ---
 # Control concurrency (set to number of cores you want to use, or 0 for auto)
 # pyvips.cache_set_max(0)  # Uncomment to disable cache (reduces memory)
@@ -64,51 +67,57 @@ def get_slide_handler(path):
 
 
 def load_json_bbox(json_path):
-    """Loads bounding box from your custom JSON format."""
+    """Loads bounding boxes from your custom JSON format.
+    Returns a list of tuples: [(minx, miny, maxx, maxy), ...]
+    """
     try:
         with open(json_path, 'r') as f:
             data = json.load(f)
     except Exception as e:
         print(f"❌ Failed to load JSON: {e}")
-        return None
+        return []
 
     # Navigate to coordinates
     try:
         labels = data.get('GroupModel', {}).get('Labels', [])
         if not labels:
             print("❌ No Labels found in JSON")
-            return None
+            return []
 
-        # Get first label's coordinates
-        coords = labels[0].get('Coordinates', [])
-        if len(coords) < 2:
-            print("❌ Invalid coordinates in JSON")
-            return None
+        bboxes = []
+        for label in labels:
+            # Get label's coordinates
+            coords = label.get('Coordinates', [])
+            if len(coords) < 2:
+                print(f"⚠️ Invalid coordinates in label ID {label.get('ID')}")
+                continue
 
-        # Extract bounding box from two corner points
-        x1, y1 = coords[0]['X'], coords[0]['Y']
-        x2, y2 = coords[1]['X'], coords[1]['Y']
+            # Extract bounding box from two corner points
+            x1, y1 = coords[0]['X'], coords[0]['Y']
+            x2, y2 = coords[1]['X'], coords[1]['Y']
 
-        # Ensure min/max order
-        minx, maxx = min(x1, x2), max(x1, x2)
-        miny, maxy = min(y1, y2), max(y1, y2)
+            # Ensure min/max order
+            minx, maxx = min(x1, x2), max(x1, x2)
+            miny, maxy = min(y1, y2), max(y1, y2)
 
-        width = maxx - minx
-        height = maxy - miny
-        area_pixels = width * height
+            width = maxx - minx
+            height = maxy - miny
+            area_pixels = width * height
 
-        print(f"  📦 JSON ROI coordinates:")
-        print(f"     Top-left: ({minx:.0f}, {miny:.0f})")
-        print(f"     Bottom-right: ({maxx:.0f}, {maxy:.0f})")
-        print(f"  📐 ROI Size: {width:.0f} x {height:.0f} pixels")
-        print(f"  📊 ROI Area: {area_pixels / 1e6:.2f} megapixels")
+            print(f"  📦 JSON ROI coordinates (ID: {label.get('ID')}):")
+            print(f"     Top-left: ({minx:.0f}, {miny:.0f})")
+            print(f"     Bottom-right: ({maxx:.0f}, {maxy:.0f})")
+            print(f"  📐 ROI Size: {width:.0f} x {height:.0f} pixels")
+            print(f"  📊 ROI Area: {area_pixels / 1e6:.2f} megapixels")
+            
+            bboxes.append((minx, miny, maxx, maxy))
 
-        return (minx, miny, maxx, maxy)
+        return bboxes
 
     except Exception as e:
         print(f"❌ Error parsing JSON structure: {e}")
         traceback.print_exc()
-        return None
+        return []
 
 
 def save_visualization(slide, bbox, save_path):
@@ -377,96 +386,165 @@ def extract_and_save_roi_from_json(wsi_path, json_path, save_path,
     wsi_path, save_path = Path(wsi_path), Path(save_path)
     print(f"\n🔹 Processing: {wsi_path.name}")
 
-    # Load ROI bounding box from JSON first
-    bbox = load_json_bbox(json_path)
-    if bbox is None:
+    # Load ROI bounding boxes from JSON first
+    bboxes = load_json_bbox(json_path)
+    if not bboxes:
         print("  ❌ No valid ROI found in JSON.")
         return False
 
     # Check if we can use optimized path (OpenSlide supported files)
-    # SDPC files must use the old path
     is_sdpc = wsi_path.suffix.lower() == '.sdpc'
     
-    if not is_sdpc:
-        return process_openslide_optimized(wsi_path, bbox, save_path, padding, target_mpp, 
-                                          manual_mpp, visualize, quality, bg_threshold, 
-                                          tile_size, compression)
-
-    # --- Fallback / SDPC Legacy Path ---
-    try:
-        slide, dims = get_slide_handler(wsi_path)
-        src_mpp = manual_mpp if manual_mpp else 0.25
-
-        print(f"  🔬 Slide info: {dims[0]} x {dims[1]} pixels")
-        print(f"  📏 Source MPP: {src_mpp:.3f}, Target MPP: {target_mpp:.3f}")
-
-        if visualize:
-            save_visualization(slide, bbox, str(save_path).replace('.tiff', '_vis.png'))
-
-        # Calculate padded region
-        minx, miny, maxx, maxy = bbox
-
-        # ROI dimensions (without padding)
-        roi_w = int(maxx - minx)
-        roi_h = int(maxy - miny)
-
-        print(f"\n  🎯 Extracting region:")
-        print(f"     Original ROI: {roi_w} x {roi_h} pixels")
-
-        # Apply padding and clamp to slide boundaries
-        x = max(0, int(minx) - padding)
-        y = max(0, int(miny) - padding)
-        w = min(int(maxx) + padding, dims[0]) - x
-        h = min(int(maxy) + padding, dims[1]) - y
-
-        print(f"     With padding ({padding}px): {w} x {h} pixels")
-        print(f"     Position: x={x}, y={y}")
-
-        # Sanity checks
-        if w <= 0 or h <= 0:
-            print(f"  ❌ Invalid region dimensions: {w} x {h}")
-            return False
-
-        if w > dims[0] or h > dims[1]:
-            print(f"  ⚠️  Warning: Region larger than slide!")
-
-        # Check for extremely large regions
-        estimated_mem = w * h * 3 / 1024 / 1024 / 1024  # GB
-        if estimated_mem > 16:  # Warning if > 16GB
-            print(f"  ⚠️  WARNING: Region is extremely large ({estimated_mem:.1f} GB raw). This might cause memory issues.")
-
-        # Read region
-        print(f"  📖 Reading region from slide...")
-        region = slide.read_region((x, y), 0, (w, h))
-        
-        # Convert to numpy and remove alpha channel in one step
-        if hasattr(region, 'mode') and region.mode == 'RGBA':
-            # PIL Image with alpha - convert to RGB directly
-            region = region.convert('RGB')
-            img_np = np.array(region, dtype=np.uint8)
+    # Helper function to process a single bbox
+    def process_single_roi(bbox, current_save_path):
+        if not is_sdpc:
+            return process_openslide_optimized(wsi_path, bbox, current_save_path, padding, target_mpp, 
+                                              manual_mpp, visualize, quality, bg_threshold, 
+                                              tile_size, compression)
         else:
-            img_np = np.array(region, dtype=np.uint8)
-            if img_np.shape[2] == 4:
-                img_np = img_np[..., :3]
+            # --- Fallback / SDPC Legacy Path ---
+            slide = None
+            img_np = None
+            try:
+                slide, dims = get_slide_handler(wsi_path)
+                src_mpp = manual_mpp if manual_mpp else 0.25
+
+                print(f"  🔬 Slide info: {dims[0]} x {dims[1]} pixels")
+                print(f"  📏 Source MPP: {src_mpp:.3f}, Target MPP: {target_mpp:.3f}")
+
+                if visualize:
+                    save_visualization(slide, bbox, str(current_save_path).replace('.tiff', '_vis.png'))
+
+                # Calculate padded region
+                minx, miny, maxx, maxy = bbox
+
+                # ROI dimensions (without padding)
+                roi_w = int(maxx - minx)
+                roi_h = int(maxy - miny)
+
+                print(f"\n  🎯 Extracting region:")
+                print(f"     Original ROI: {roi_w} x {roi_h} pixels")
+
+                # Apply padding and clamp to slide boundaries
+                x = max(0, int(minx) - padding)
+                y = max(0, int(miny) - padding)
+                w = min(int(maxx) + padding, dims[0]) - x
+                h = min(int(maxy) + padding, dims[1]) - y
+
+                print(f"     With padding ({padding}px): {w} x {h} pixels")
+                print(f"     Position: x={x}, y={y}")
+
+                # Sanity checks
+                if w <= 0 or h <= 0:
+                    print(f"  ❌ Invalid region dimensions: {w} x {h}")
+                    return False
+
+                if w > dims[0] or h > dims[1]:
+                    print(f"  ⚠️  Warning: Region larger than slide!")
+
+                # Check for extremely large regions
+                estimated_mem = w * h * 3 / 1024 / 1024 / 1024  # GB
+                if estimated_mem > MAX_MEMORY_GB:  # Limit to 12GB to prevent OOM
+                    print(f"  ❌ ERROR: Region is too large ({estimated_mem:.1f} GB raw). Skipping to prevent OOM.")
+                    return False
+
+                # Read region
+                print(f"  📖 Reading region from slide...")
+                region = slide.read_region((x, y), 0, (w, h))
+                
+                # Convert to numpy and remove alpha channel in one step
+                if hasattr(region, 'mode') and region.mode == 'RGBA':
+                    # PIL Image with alpha - convert to RGB directly
+                    region = region.convert('RGB')
+                    img_np = np.array(region, dtype=np.uint8)
+                else:
+                    img_np = np.array(region, dtype=np.uint8)
+                    if img_np.shape[2] == 4:
+                        img_np = img_np[..., :3]
+                
+                # Free PIL image memory immediately
+                del region
+
+                print(f"  ✅ Extracted image: {img_np.shape[1]} x {img_np.shape[0]} x {img_np.shape[2]}")
+                print(f"  💾 Raw size: {img_np.nbytes / 1024 / 1024:.1f} MB")
+
+                # Calculate scale factor
+                scale_factor = src_mpp / target_mpp
+                if abs(scale_factor - 1.0) > 0.01:
+                    new_w = int(img_np.shape[1] * scale_factor)
+                    new_h = int(img_np.shape[0] * scale_factor)
+                    print(f"  🔄 Will resample to: {new_w} x {new_h} (x{scale_factor:.2f})")
+
+                result = save_pyramid_tiff(img_np, current_save_path, target_mpp, scale_factor, 
+                                        quality=quality, bg_threshold=bg_threshold, 
+                                        tile_size=tile_size, compression=compression)
+                
+                # Free numpy array memory
+                del img_np
+                return result
+
+            except Exception as e:
+                print(f"  ❌ Error: {e}")
+                traceback.print_exc()
+                return False
+            finally:
+                # Ensure slide is closed
+                if slide is not None and hasattr(slide, 'close'):
+                    try:
+                        slide.close()
+                    except:
+                        pass
+                # Force garbage collection
+                gc.collect()
+
+    # Logic for handling multiple ROIs
+    if len(bboxes) == 1:
+        return process_single_roi(bboxes[0], save_path)
+    
+    elif len(bboxes) == 2:
+        print(f"  🔢 Found 2 ROIs. Attempting to split based on filename...")
+        # Sort by X coordinate (minx)
+        bboxes.sort(key=lambda b: b[0])
         
-        print(f"  ✅ Extracted image: {img_np.shape[1]} x {img_np.shape[0]} x {img_np.shape[2]}")
-        print(f"  💾 Raw size: {img_np.nbytes / 1024 / 1024:.1f} MB")
-
-        # Calculate scale factor
-        scale_factor = src_mpp / target_mpp
-        if abs(scale_factor - 1.0) > 0.01:
-            new_w = int(img_np.shape[1] * scale_factor)
-            new_h = int(img_np.shape[0] * scale_factor)
-            print(f"  🔄 Will resample to: {new_w} x {new_h} (x{scale_factor:.2f})")
-
-        return save_pyramid_tiff(img_np, save_path, target_mpp, scale_factor, 
-                                quality=quality, bg_threshold=bg_threshold, 
-                                tile_size=tile_size, compression=compression)
-
-    except Exception as e:
-        print(f"  ❌ Error: {e}")
-        traceback.print_exc()
-        return False
+        # Parse filename
+        filename = wsi_path.stem
+        # Regex to match PathologyNumber + TissueCodes (2 letters) + Suffix
+        # e.g. B2022-25838AB-cd20 -> B2022-25838, AB, -cd20
+        match = re.search(r'([a-zA-Z0-9]+-\d+)([A-Z]{2})(.*)', filename)
+        
+        if match:
+            pathology_num = match.group(1)
+            tissue_codes = match.group(2)
+            suffix = match.group(3)
+            
+            print(f"     Pathology Number: {pathology_num}")
+            print(f"     Tissue Codes: {tissue_codes}")
+            print(f"     Suffix: {suffix}")
+            
+            results = []
+            
+            # Left ROI -> First letter
+            left_name = f"{pathology_num}{tissue_codes[0]}{suffix}"
+            left_path = save_path.with_name(left_name + save_path.suffix)
+            print(f"     ⬅️ Left ROI -> {left_path.name}")
+            results.append(process_single_roi(bboxes[0], left_path))
+            
+            # Right ROI -> Second letter
+            right_name = f"{pathology_num}{tissue_codes[1]}{suffix}"
+            right_path = save_path.with_name(right_name + save_path.suffix)
+            print(f"     ➡️ Right ROI -> {right_path.name}")
+            results.append(process_single_roi(bboxes[1], right_path))
+            
+            return all(results)
+        else:
+            print(f"  ⚠️  Filename '{filename}' does not match expected pattern for splitting (e.g., '...AB...').")
+            print(f"  ⚠️  Processing only the first ROI as fallback.")
+            return process_single_roi(bboxes[0], save_path)
+            
+    else:
+        print(f"  ⚠️  Found {len(bboxes)} ROIs. Only 1 or 2 are supported for automatic splitting.")
+        print(f"  ⚠️  Processing only the first ROI.")
+        return process_single_roi(bboxes[0], save_path)
 
 
 def batch_process_folder(input_dir, output_dir, 
@@ -585,11 +663,16 @@ def batch_process_folder(input_dir, output_dir,
             processing_time = time.time() - file_start_time
             
             if success:
-                output_size = out_path.stat().st_size / 1024 / 1024
-                logger.info(f"   ✅ SUCCESS")
-                logger.info(f"   📦 Output Size: {output_size:.1f} MB")
-                logger.info(f"   ⏱️  Processing Time: {processing_time:.1f} seconds")
-                logger.info(f"   💾 Saved to: {out_path}")
+                if out_path.exists():
+                    output_size = out_path.stat().st_size / 1024 / 1024
+                    logger.info(f"   ✅ SUCCESS")
+                    logger.info(f"   📦 Output Size: {output_size:.1f} MB")
+                    logger.info(f"   ⏱️  Processing Time: {processing_time:.1f} seconds")
+                    logger.info(f"   💾 Saved to: {out_path}")
+                else:
+                    logger.info(f"   ✅ SUCCESS (Split into multiple files)")
+                    logger.info(f"   ⏱️  Processing Time: {processing_time:.1f} seconds")
+                    logger.info(f"   💾 Saved to: {out_path.parent} (See split files)")
                 stats['ok'] += 1
             else:
                 logger.error(f"   ❌ FAILED: Processing returned False")
@@ -602,6 +685,9 @@ def batch_process_folder(input_dir, output_dir,
             logger.error(f"   ⏱️  Time spent: {processing_time:.1f} seconds")
             logger.debug(f"   Stack trace:", exc_info=True)
             stats['fail'] += 1
+        
+        # Force garbage collection after each file
+        gc.collect()
     
     # Final summary
     total_time = time.time() - start_time
@@ -620,15 +706,15 @@ def batch_process_folder(input_dir, output_dir,
 
 if __name__ == "__main__":
     # extract_and_save_roi_from_json(
-    #     wsi_path="/home/william/Downloads/B2018-06208B-cd3.svs",
-    #     json_path="/home/william/Downloads/B2018-06208B-cd3.json",
-    #     save_path="/home/william/Downloads/B2018-06208B-cd3.tiff",
+    #     wsi_path="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue/B2022-18090BC-cd3.sdpc",
+    #     json_path="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue/B2022-18090BC-cd3.json",
+    #     save_path="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue/B2022-18090BC-cd3.tiff",
     #     target_mpp=0.104074,
     #     manual_mpp=0.104074,
     #     padding=1000,
     #     visualize=True,
     #     compression='jpeg',
-    #     quality=80,
+    #     quality=85,
     #     tile_size=512,        
     #     bg_threshold=None
     # )   
@@ -636,8 +722,8 @@ if __name__ == "__main__":
 
     # 批量处理示例 - 递归搜索所有子文件夹
     batch_process_folder(
-        input_dir="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/hasROI",
-        output_dir="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/hasROI",
+        input_dir="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue",
+        output_dir="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue",
         file_pattern="*.sdpc",
         recursive=True,      # 递归搜索子文件夹
         target_mpp=0.104,
