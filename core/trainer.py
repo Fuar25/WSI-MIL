@@ -35,8 +35,11 @@ class Trainer:
 
                 optimizer.zero_grad()
                 
+                # Reshape label for model if binary classification to match logits [B, 1]
+                model_label = label.view(-1, 1) if self.model_cfg.num_classes == 1 else label
+                
                 # Pass label and criterion to model to allow internal loss calculation (e.g. CLAM instance loss)
-                logits, loss, _ = model(features, label=label, loss_fn=criterion)
+                logits, loss, _ = model(features, label=model_label, loss_fn=criterion)
 
                 if loss is None:
                     # Fallback to external loss calculation if model didn't return one
@@ -74,8 +77,11 @@ class Trainer:
                 features = features.to(self.device)
                 label = label.to(self.device)
                 
+                # Reshape label for model if binary classification to match logits [B, 1]
+                model_label = label.view(-1, 1) if self.model_cfg.num_classes == 1 else label
+                
                 # Pass label and criterion to model (though loss is not used for backprop here, it might be logged)
-                logits, loss, _ = model(features, label=label, loss_fn=criterion)
+                logits, loss, _ = model(features, label=model_label, loss_fn=criterion)
                 
                 if loss is None:
                     if self.model_cfg.num_classes == 1:
@@ -332,9 +338,9 @@ class Trainer:
             
         total_time = time.time() - cv_start_time
         
-        if self.config.log_test_results and all_fold_results_dfs:
+        if self.logging_cfg.log_test_results and all_fold_results_dfs:
             full_df = pd.concat(all_fold_results_dfs, ignore_index=True)
-            full_csv_path = os.path.join(self.config.save_dir, f'full_{self.config.test_results_csv}')
+            full_csv_path = os.path.join(self.logging_cfg.save_dir, f'full_{self.logging_cfg.test_results_csv}')
             full_df.to_csv(full_csv_path, index=False)
             print(f"  Full test results saved to {full_csv_path}")
         

@@ -13,7 +13,7 @@ import pyvips
 import openslide
 from opensdpc import OpenSdpc
 
-MAX_MEMORY_GB = 48  # Maximum allowed memory for ROI extraction in GB
+MAX_MEMORY_GB = 36  # Maximum allowed memory for ROI extraction in GB
 # --- Libvips Performance Tuning ---
 # Control concurrency (set to number of cores you want to use, or 0 for auto)
 # pyvips.cache_set_max(0)  # Uncomment to disable cache (reduces memory)
@@ -639,6 +639,31 @@ def batch_process_folder(input_dir, output_dir,
             logger.info(f"   ⏭️  SKIPPED: Output file already exists ({existing_size:.1f} MB)")
             stats['skip_exists'] += 1
             continue
+            
+        # Check for split outputs (for 2 ROIs case)
+        # Regex to match PathologyNumber + TissueCodes (2 letters) + Suffix
+        match = re.search(r'([a-zA-Z0-9]+-\d+)([A-Z]{2})(.*)', wsi_file.stem)
+        if match:
+            pathology_num = match.group(1)
+            tissue_codes = match.group(2)
+            suffix_part = match.group(3)
+            
+            # Construct expected split filenames (Left and Right)
+            # Must match logic in extract_and_save_roi_from_json
+            ext = out_path.suffix
+            
+            left_name = f"{pathology_num}{tissue_codes[0]}{suffix_part}{ext}"
+            right_name = f"{pathology_num}{tissue_codes[1]}{suffix_part}{ext}"
+            
+            left_path = out_path.with_name(left_name)
+            right_path = out_path.with_name(right_name)
+            
+            if left_path.exists() and right_path.exists():
+                logger.info(f"   ⏭️  SKIPPED: Split output files already exist:")
+                logger.info(f"       - {left_path.name}")
+                logger.info(f"       - {right_path.name}")
+                stats['skip_exists'] += 1
+                continue
         
         # Get input file size
         input_size = wsi_file.stat().st_size / 1024 / 1024
@@ -706,9 +731,9 @@ def batch_process_folder(input_dir, output_dir,
 
 if __name__ == "__main__":
     # extract_and_save_roi_from_json(
-    #     wsi_path="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue/B2022-18090BC-cd3.sdpc",
-    #     json_path="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue/B2022-18090BC-cd3.json",
-    #     save_path="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue/B2022-18090BC-cd3.tiff",
+    #     wsi_path="/mnt/6T/GML/DATA/WSI/SDPC/MALT/Ki-67/hasROI/B2019-36238AB-ki67.sdpc",
+    #     json_path="/mnt/6T/GML/DATA/WSI/SDPC/MALT/Ki-67/hasROI/B2019-36238AB-ki67.json",
+    #     save_path="/mnt/6T/GML/DATA/WSI/SDPC/MALT/Ki-67/hasROI/B2019-36238AB-ki67.tiff",
     #     target_mpp=0.104074,
     #     manual_mpp=0.104074,
     #     padding=1000,
@@ -722,10 +747,10 @@ if __name__ == "__main__":
 
     # 批量处理示例 - 递归搜索所有子文件夹
     batch_process_folder(
-        input_dir="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue",
-        output_dir="/mnt/6T/GML/DATA/WSI/SDPC/Reactive/CD3-CD20/Paired-tissue",
+        input_dir="/mnt/6T/GML/DATA/WSI/SDPC/MALT/HE",
+        output_dir="/mnt/6T/GML/DATA/WSI/SDPC/MALT/HE",
         file_pattern="*.sdpc",
-        recursive=True,      # 递归搜索子文件夹
+        recursive=False,      # 递归搜索子文件夹
         target_mpp=0.104,
         manual_mpp=0.104,
         padding=1000,

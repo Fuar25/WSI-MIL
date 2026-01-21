@@ -113,16 +113,16 @@ def main():
 if __name__ == "__main__":
     
     runtime_config.dataset.data_paths = {
-        'positive': '/mnt/6T/GML/Experiments/Experiment3/MALT/10x_256px_0px_overlap/slide_features_feather-univ2',
-        'negative': '/mnt/6T/GML/Experiments/Experiment3/Reactive/10x_256px_0px_overlap/slide_features_feather-univ2'
+        'positive': '/mnt/5T/Tiff/Experiments/Experiment1/Ki-67/MALT/10x_256px_0px_overlap/features_uni_v2',
+        'negative': '/mnt/5T/Tiff/Experiments/Experiment1/Ki-67/Reactive/10x_256px_0px_overlap/features_uni_v2'
     }
 
-    runtime_config.logging.save_dir = "/mnt/6T/GML/Experiments/Experiment3/results"
+    runtime_config.logging.save_dir = "/mnt/5T/Tiff/Experiments/Experiment1/results/Ki-67"
     runtime_config.training.device = "cuda:2"
     runtime_config.training.seed = 42
 
-    runtime_config.model.model_name = 'abmil.base.uni.pc108-24k'
-    runtime_config.model.input_dim = 512
+    runtime_config.model.model_name = 'abmil'
+    runtime_config.model.input_dim = 1536
     runtime_config.model.hidden_dim = 512
     runtime_config.model.n_heads = 4
     runtime_config.model.dropout = 0.2
