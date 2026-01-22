@@ -59,6 +59,11 @@ class TrainingConfig:
     k_folds: int = 5
     val_ratio: float = 0.1
     
+    # Voting strategy for patient-level aggregation
+    # 'majority': Hard voting (majority class wins)
+    # 'average': Soft voting (average probabilities)
+    voting_strategy: str = 'average'
+    
     # Full dataset training
     best_epochs: int = 9
 

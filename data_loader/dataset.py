@@ -4,8 +4,17 @@ import torch
 import numpy as np
 import pandas as pd
 import h5py
+import re
 from typing import Tuple, Dict, Any, Optional, List
 from core.base import BaseDataset
+
+
+def extract_patient_id(filename: str) -> Optional[str]:
+    """Extract patient ID using (xs)Byyyy-xxxxx pattern; warn upstream when missing."""
+    match = re.search(r"((?:xs)?B\d{4}-\d{5})", filename)
+    if match:
+        return match.group(1)
+    return None
 
 class WSIFeatureDataset(BaseDataset):
     """
@@ -54,23 +63,31 @@ class WSIFeatureDataset(BaseDataset):
             for filename in files:
                 if filename.endswith(self.feature_suffix):
                     # Extract sample ID from filename
-                    # e.g., "sample1_ctranspath.npy" -> "sample1"
                     sample_id = filename.replace(self.feature_suffix, '')
                     
                     if sample_id in label_map:
+                        patient_id = extract_patient_id(filename)
+                        if patient_id is None:
+                            print(f"Warning: Could not extract Patient ID from {filename}. Skipping this file.")
+                            continue
+                            
                         file_path = os.path.join(root, filename)
                         label = label_map[sample_id]
                         self.data.append({
                             'sample_id': sample_id,
+                            'patient_id': patient_id,
                             'filename': filename,
                             'feature_path': file_path,
                             'label': label
                         })
 
+    def get_patient_ids(self) -> List[str]:
+        return [item['patient_id'] for item in self.data]
+
     def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, str, str]:
         item = self.data[idx]
         
         # Load features
@@ -78,9 +95,9 @@ class WSIFeatureDataset(BaseDataset):
         features = torch.from_numpy(features).float()
         
         # Handle label
-        label = torch.tensor(item['label']).float() # Assuming binary/regression. Change to long() for multi-class
+        label = torch.tensor(item['label']).float()
         
-        return features, label, item['filename']
+        return features, label, item['filename'], item['patient_id']
 
     def get_metadata(self, idx: int) -> Dict[str, Any]:
         return self.data[idx]
@@ -140,19 +157,28 @@ class H5FeatureDataset(BaseDataset):
             for root, _, files in os.walk(dir_path):
                 for filename in files:
                     if filename.endswith('.h5'):
+                        patient_id = extract_patient_id(filename)
+                        if patient_id is None:
+                            print(f"Warning: Could not extract Patient ID from {filename}. Skipping this file.")
+                            continue
+                            
                         file_path = os.path.join(root, filename)
                         self.data.append({
                             'sample_id': filename.replace('.h5', ''),
+                            'patient_id': patient_id,
                             'filename': filename,
                             'feature_path': file_path,
                             'label': label,
                             'class_name': cls_name
                         })
 
+    def get_patient_ids(self) -> List[str]:
+        return [item['patient_id'] for item in self.data]
+
     def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, str, str]:
         item = self.data[idx]
         
         with h5py.File(item['feature_path'], 'r') as f:
@@ -162,13 +188,11 @@ class H5FeatureDataset(BaseDataset):
         
         # Return appropriate label type based on mode
         if self.binary_mode:
-            # Binary classification: return as float (0.0 or 1.0)
             label = torch.tensor(item['label']).float()
         else:
-            # Multi-class: return as long (integer class index)
             label = torch.tensor(item['label']).long()
         
-        return features, label, item['filename']
+        return features, label, item['filename'], item['patient_id']
 
     def get_metadata(self, idx: int) -> Dict[str, Any]:
         return self.data[idx]

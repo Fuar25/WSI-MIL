@@ -120,6 +120,7 @@ if __name__ == "__main__":
     runtime_config.logging.save_dir = "/mnt/5T/Tiff/Experiments/Experiment1/results/Ki-67"
     runtime_config.training.device = "cuda:2"
     runtime_config.training.seed = 42
+    runtime_config.training.voting_strategy = "majority"  # 使用硬投票聚合到patient级
 
     runtime_config.model.model_name = 'abmil'
     runtime_config.model.input_dim = 1536
