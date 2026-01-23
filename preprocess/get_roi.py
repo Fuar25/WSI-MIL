@@ -747,8 +747,8 @@ if __name__ == "__main__":
 
     # 批量处理示例 - 递归搜索所有子文件夹
     batch_process_folder(
-        input_dir="/mnt/6T/GML/DATA/WSI/SDPC/MALT/HE",
-        output_dir="/mnt/6T/GML/DATA/WSI/SDPC/MALT/HE",
+        input_dir="/mnt/6T/GML/DATA/WSI/Others/Reactive-Hyperplasia/xsB2023-01220",
+        output_dir="/home/william/Downloads",
         file_pattern="*.sdpc",
         recursive=False,      # 递归搜索子文件夹
         target_mpp=0.104,

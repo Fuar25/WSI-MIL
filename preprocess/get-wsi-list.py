@@ -1,55 +1,3 @@
-from collections import Counter
-
-import re
-
-import os
-import pandas as pd
-from pathlib import Path
-
-
-def collect_ihc_files(root_path, output_csv="wsi_paths2.csv"):
-    """
-    遍历根目录，收集包含 cd3 和 cd20 的 IHC 文件相对路径并保存为 CSV。
-
-    :param root_path: 根目录路径
-    :param output_csv: 输出的 CSV 文件名
-    """
-    root = Path(root_path)
-    data = []
-
-    # 定义目标抗体名（转为小写以方便匹配）
-    target_antibodies = {'HE'}
-
-    # 遍历根目录下所有的子文件夹（病理号文件夹）
-    # 使用 rglob 递归搜索所有 sdpc 文件
-    # 路径模式：*/ToRegister/*.sdpc
-    search_pattern = "*/ToRegister/*.sdpc"
-
-    for file_path in root.glob(search_pattern):
-        # file_path 是一个完整的路径对象
-        # 提取文件名，例如: B2018-06208B-cd20.sdpc
-        file_name = file_path.name
-
-        # 判断文件名中是否包含目标抗体名
-        # 这里使用 any 配合 split 来精准匹配，防止类似 "mcd20" 这种干扰
-        if any(antibody in file_name for antibody in target_antibodies):
-            # 获取相对于根目录的相对路径
-            relative_path = file_path.relative_to(root)
-            data.append(str(relative_path))
-
-    # 创建 DataFrame 并保存
-    df = pd.DataFrame(data, columns=['wsi'])
-    df.to_csv(output_csv, index=False, encoding='utf-8')
-
-    print(f"处理完成！共收集到 {len(df)} 个文件。结果已保存至: {output_csv}")
-
-# 使用示例
-# collect_ihc_files("/mnt/gml/GML/DATA/WSI/Reactive-Hyperplasia")
-
-
-import os
-import shutil
-
 
 def organize_sdpc_files(root_path):
     # 1. 定义分类规则
@@ -94,20 +42,8 @@ def organize_sdpc_files(root_path):
                 shutil.move(file_path, os.path.join(dest_dir, filename))
                 print(f"已移动: {filename} -> {target_folder}/")
 
-
-import os
-import re
 import shutil
-from pathlib import Path
 from typing import Dict, Set
-
-import os
-import re
-import shutil
-from pathlib import Path
-from typing import Dict, Set
-import pandas as pd
-
 
 def reorganize_pathology_files(source_root: str, target_root: str):
     """
