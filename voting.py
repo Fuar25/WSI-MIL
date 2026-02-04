@@ -1,3 +1,8 @@
+"""
+Result-level fusion (voting) for multi-stain MIL models.
+Aggregates predictions/probabilities from different stain models at the result level.
+"""
+
 import os
 import numpy as np
 import pandas as pd
@@ -5,144 +10,76 @@ import time
 from sklearn.metrics import roc_auc_score
 
 from config.config import runtime_config
-from data_loader.dataset import H5FeatureDataset, WSIFeatureDataset
-from models.mil_models import MILModel
-from models.linear_probe import LinearProbe
-from core.trainer import Trainer
-
-# ANSI color helpers for terminal clarity
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-CYAN = "\033[96m"
-RESET = "\033[0m"
+from core.fusion_utils import (
+    GREEN, YELLOW, RED, CYAN, RESET,
+    run_cv_for_stain
+)
 
 # =====================
 # 写死的多染色配置示例，可按需修改
 # =====================
-# STAIN_RUNS = [
-#     {
-#         "name": "CD20",
-#         "data_paths": {
-#             "positive": "/mnt/5T/Tiff/Experiments/Experiment1/CD20/MALT/10x_256px_0px_overlap/features_uni_v2",
-#             "negative": "/mnt/5T/Tiff/Experiments/Experiment1/CD20/Reactive/10x_256px_0px_overlap/features_uni_v2",
-#         },
-#         "save_dir": "/mnt/5T/Tiff/Experiments/Experiment1/results/CD20",
-#         "weight": 1.0,
-#     },
-#     {
-#         "name": "CD3",
-#         "data_paths": {
-#             "positive": "/mnt/5T/Tiff/Experiments/Experiment1/CD3/MALT/10x_256px_0px_overlap/features_uni_v2",
-#             "negative": "/mnt/5T/Tiff/Experiments/Experiment1/CD3/Reactive/10x_256px_0px_overlap/features_uni_v2",
-#         },
-#         "save_dir": "/mnt/5T/Tiff/Experiments/Experiment1/results/CD3",
-#         "weight": 1.0,
-#     },
-#     {
-#         "name": "Ki-67",
-#         "data_paths": {
-#             "positive": "/mnt/5T/Tiff/Experiments/Experiment1/Ki-67/MALT/10x_256px_0px_overlap/features_uni_v2",
-#             "negative": "/mnt/5T/Tiff/Experiments/Experiment1/Ki-67/Reactive/10x_256px_0px_overlap/features_uni_v2",
-#         },
-#         "save_dir": "/mnt/5T/Tiff/Experiments/Experiment1/results/Ki-67",
-#         "weight": 1.0,
-#     },
-#     {
-#         "name": "CD21",
-#         "data_paths": {
-#             "positive": "/mnt/5T/Tiff/Experiments/Experiment1/CD21/MALT/10x_256px_0px_overlap/features_uni_v2",
-#             "negative": "/mnt/5T/Tiff/Experiments/Experiment1/CD21/Reactive/10x_256px_0px_overlap/features_uni_v2",
-#         },
-#         "save_dir": "/mnt/5T/Tiff/Experiments/Experiment1/results/CD21",
-#         "weight": 1.0,
-#     },
-#     {
-#         "name": "CK-pan",
-#         "data_paths": {
-#             "positive": "/mnt/5T/Tiff/Experiments/Experiment1/CK-pan/MALT/10x_256px_0px_overlap/features_uni_v2",
-#             "negative": "/mnt/5T/Tiff/Experiments/Experiment1/CK-pan/Reactive/10x_256px_0px_overlap/features_uni_v2",
-#         },
-#         "save_dir": "/mnt/5T/Tiff/Experiments/Experiment1/results/CK-pan",
-#         "weight": 1.0,
-#     },
-# ]
-
 STAIN_RUNS = [
     {
         "name": "HE",
         "data_paths": {
-            "positive": "/mnt/5T/Tiff/Experiments/Experiment1/HE/MALT/10x_256px_0px_overlap/features_uni_v2",
-            "negative": "/mnt/5T/Tiff/Experiments/Experiment1/HE/Reactive/10x_256px_0px_overlap/features_uni_v2",
+            "positive": "/mnt/5T/GML/Tiff/Experiments/Experiment1/HE/MALT/10x_256px_0px_overlap/features_uni_v2",
+            "negative": "/mnt/5T/GML/Tiff/Experiments/Experiment1/HE/Reactive/10x_256px_0px_overlap/features_uni_v2",
         },
-        "save_dir": "/mnt/5T/Tiff/Experiments/Experiment1/results/HE",
+        "save_dir": "/mnt/5T/GML/Tiff/Experiments/Experiment1/results/HE",
         "weight": 1.0,
-    }
+    },
+    # {
+    #     "name": "CD20",
+    #     "data_paths": {
+    #         "positive": "/mnt/5T/GML/Tiff/Experiments/Experiment1/CD20/MALT/10x_256px_0px_overlap/features_uni_v2",
+    #         "negative": "/mnt/5T/GML/Tiff/Experiments/Experiment1/CD20/Reactive/10x_256px_0px_overlap/features_uni_v2",
+    #     },
+    #     "save_dir": "/mnt/5T/GML/Tiff/Experiments/Experiment1/results/CD20",
+    #     "weight": 1.0,
+    # },
+    # {
+    #     "name": "CD3",
+    #     "data_paths": {
+    #         "positive": "/mnt/5T/GML/Tiff/Experiments/Experiment1/CD3/MALT/10x_256px_0px_overlap/features_uni_v2",
+    #         "negative": "/mnt/5T/GML/Tiff/Experiments/Experiment1/CD3/Reactive/10x_256px_0px_overlap/features_uni_v2",
+    #     },
+    #     "save_dir": "/mnt/5T/GML/Tiff/Experiments/Experiment1/results/CD3",
+    #     "weight": 1.0,
+    # },
+    {
+        "name": "Ki-67",
+        "data_paths": {
+            "positive": "/mnt/5T/GML/Tiff/Experiments/Experiment1/Ki-67/MALT/10x_256px_0px_overlap/features_uni_v2",
+            "negative": "/mnt/5T/GML/Tiff/Experiments/Experiment1/Ki-67/Reactive/10x_256px_0px_overlap/features_uni_v2",
+        },
+        "save_dir": "/mnt/5T/GML/Tiff/Experiments/Experiment1/results/Ki-67",
+        "weight": 1.0,
+    },
+    # {
+    #     "name": "CD21",
+    #     "data_paths": {
+    #         "positive": "/mnt/5T/GML/Tiff/Experiments/Experiment1/CD21/MALT/10x_256px_0px_overlap/features_uni_v2",
+    #         "negative": "/mnt/5T/GML/Tiff/Experiments/Experiment1/CD21/Reactive/10x_256px_0px_overlap/features_uni_v2",
+    #     },
+    #     "save_dir": "/mnt/5T/GML/Tiff/Experiments/Experiment1/results/CD21",
+    #     "weight": 1.0,
+    # },
+    # {
+    #     "name": "CK-pan",
+    #     "data_paths": {
+    #         "positive": "/mnt/5T/GML/Tiff/Experiments/Experiment1/CK-pan/MALT/10x_256px_0px_overlap/features_uni_v2",
+    #         "negative": "/mnt/5T/GML/Tiff/Experiments/Experiment1/CK-pan/Reactive/10x_256px_0px_overlap/features_uni_v2",
+    #     },
+    #     "save_dir": "/mnt/5T/GML/Tiff/Experiments/Experiment1/results/CK-pan",
+    #     "weight": 1.0,
+    # },
 ]
 
-
-
 # 融合输出目录
-FUSION_SAVE_DIR = "/mnt/5T/Tiff/Experiments/Experiment1/results/fusion"
+FUSION_SAVE_DIR = "/mnt/5T/GML/Tiff/Experiments/Experiment1/results/Ki-67"
 
 # 跨染色融合策略: "average"(软) 或 "majority"(硬)
-CROSS_STAIN_STRATEGY = "average"
-
-# 使用的数据类型: "h5" 或 "npy"。当前示例用 h5。
-DATASET_TYPE = "h5"
-
-
-def build_dataset(dataset_type):
-    """按 dataset_type 构建数据集实例。"""
-    if dataset_type == "h5":
-        dataset = H5FeatureDataset(
-            data_paths=runtime_config.dataset.data_paths,
-            feature_key=runtime_config.dataset.feature_key,
-            binary_mode=runtime_config.dataset.binary_mode,
-        )
-        num_dataset_classes = len(dataset.classes)
-        if num_dataset_classes == 2:
-            runtime_config.model.num_classes = 1
-        else:
-            raise ValueError(f"{num_dataset_classes} classes has not been supported!")
-        return dataset
-
-    if dataset_type == "npy":
-        dataset = WSIFeatureDataset(
-            root_dir=runtime_config.dataset.root_dir,
-            csv_path=runtime_config.dataset.csv_path,
-            label_col=runtime_config.dataset.label_col,
-            sample_id_col=runtime_config.dataset.sample_id_col,
-            feature_suffix=runtime_config.dataset.feature_suffix,
-        )
-        return dataset
-
-    raise TypeError(f"{dataset_type} type has not been supported!")
-
-
-def pick_model_class():
-    if runtime_config.model.model_name == "linear_probe":
-        return LinearProbe
-    if runtime_config.model.model_name != "abmil":
-        runtime_config.model.mil_lab_model_name = runtime_config.model.model_name
-    return MILModel
-
-
-def run_cv_for_stain(stain_cfg, k_folds):
-    """对单个染色运行交叉验证，结果保存在 stain_cfg['save_dir']。"""
-    runtime_config.dataset.dataset_type = DATASET_TYPE
-    runtime_config.dataset.data_paths = stain_cfg["data_paths"]
-    runtime_config.logging.save_dir = stain_cfg["save_dir"]
-    runtime_config.training.voting_strategy = runtime_config.training.voting_strategy  # 使用已有 patient-level 策略
-
-    print(f"\n{CYAN}================ Running stain: {stain_cfg['name']} ================{RESET}")
-    dataset = build_dataset(DATASET_TYPE)
-    if len(dataset) == 0:
-        raise RuntimeError(f"No data found for stain {stain_cfg['name']}")
-
-    model_class = pick_model_class()
-    trainer = Trainer(model_class, dataset, runtime_config)
-    trainer.cross_validate(k_folds=k_folds)
+CROSS_STAIN_STRATEGY = "majority"
 
 
 def fuse_binary(big_df, strategy, weights):
@@ -275,23 +212,41 @@ def fuse_per_fold(stain_runs, k_folds, fusion_dir, strategy):
         print(f"  {CYAN}Average Fused Patient Acc: {mean_acc:.4f} +/- {std_acc:.4f}{RESET}")
         print(f"  {CYAN}Total Fusion Time: {total_time_min:.2f} minutes{RESET}")
         print(f"  {GREEN}Full fusion results saved to: {full_path}{RESET}")
+        return mean_auc, std_auc, mean_acc, std_acc
     else:
         print(f"{RED}No fusion outputs generated.{RESET}")
+        return 0.0, 0.0, 0.0, 0.0
 
 
 def main():
     k_folds = runtime_config.training.k_folds
 
-    # 逐染色运行 CV
+    # 逐染色运行 CV (result-level fusion 不需要保存特征)
     for run_cfg in STAIN_RUNS:
-        run_cv_for_stain(run_cfg, k_folds)
+        run_cv_for_stain(run_cfg, k_folds, save_features=False)
 
     # 跨染色按折融合
-    fuse_per_fold(STAIN_RUNS, k_folds, FUSION_SAVE_DIR, CROSS_STAIN_STRATEGY)
+    return fuse_per_fold(STAIN_RUNS, k_folds, FUSION_SAVE_DIR, CROSS_STAIN_STRATEGY)
 
 
 if __name__ == "__main__":
     # 可按需覆盖设备等参数
     runtime_config.training.device = "cuda:2"
-    runtime_config.training.voting_strategy = CROSS_STAIN_STRATEGY  # 单染色患者聚合策略，可调
-    main()
+    runtime_config.training.voting_strategy = "average"  # 单染色患者聚合策略，可调
+
+    import sys
+    log_file = "fusion_repeat_log.txt"
+    with open(log_file, "w") as f:
+        f.write("Repeat Experiment Log\n")
+
+    for i in range(10):
+        print(f"\n>>>>>>>>>>>>>>> Repeat {i+1}/10 <<<<<<<<<<<<<<<")
+        try:
+            mean_auc, std_auc, mean_acc, std_acc = main()
+            log_str = (f"Run {i+1}: Average Fused Patient AUC: {mean_auc:.4f} +/- {std_auc:.4f}\n"
+                       f"        Average Fused Patient Acc: {mean_acc:.4f} +/- {std_acc:.4f}\n")
+            with open(log_file, "a") as f:
+                f.write(log_str)
+        except Exception as e:
+            print(f"Run {i+1} Error: {e}")
+

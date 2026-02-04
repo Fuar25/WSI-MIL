@@ -1,70 +1,65 @@
 from dataclasses import dataclass, field
-from typing import Optional, Dict
+from typing import Dict, Optional
+
+from .defaults import (
+    BINARY_THRESHOLD,
+    DEFAULT_DATASET_NAME,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_VOTING_STRATEGY,
+    PATIENT_ID_PATTERN,
+)
 
 
 @dataclass
 class DatasetConfig:
-    """Dataset configuration parameters"""
-    dataset_type: str = 'h5'  # 'npy' or 'h5'
-    
-    # For 'npy' dataset (CSV-based)
-    root_dir: str = './data/ctranspath'
-    csv_path: str = './data/labels.csv'
-    label_col: str = 'GT'
-    sample_id_col: str = 'file_name'
-    feature_suffix: str = '_ctranspath.npy'
-    
-    # For 'h5' dataset (directory-based, each directory is a class)
-    data_paths: Optional[Dict[str, str]] = field(default_factory=lambda: {
-        'positive': '/mnt/6T/GML/Experiments/Experiment3/MALT/10x_256px_0px_overlap/slide_features_chief',
-        'negative': '/mnt/6T/GML/Experiments/Experiment3/Reactive/10x_256px_0px_overlap/slide_features_chief'
-    })
+    """Dataset configuration parameters."""
+
+    dataset_name: str = DEFAULT_DATASET_NAME
+    data_paths: Optional[Dict[str, str]] = field(
+        default_factory=lambda: {
+            'positive': '/mnt/6T/GML/Experiments/Experiment3/MALT/10x_256px_0px_overlap/slide_features_chief',
+            'negative': '/mnt/6T/GML/Experiments/Experiment3/Reactive/10x_256px_0px_overlap/slide_features_chief',
+        }
+    )
     feature_key: str = 'features'
-    binary_mode: bool = True
+    coords_key: str = 'coords'
+    patient_id_pattern: str = PATIENT_ID_PATTERN
+    binary_mode: Optional[bool] = None
 
 
 @dataclass
 class ModelConfig:
-    """Model architecture configuration parameters"""
-    model_name: str = 'abmil'  # 'abmil', 'linear_probe', or MIL-Lab model string
-    
-    # MIL-Lab integration
-    use_mil_lab: bool = True
-    mil_lab_model_name: str = 'abmil'  # Specific model name for MIL-Lab builder (e.g. 'clam_sb', 'transmil')
-    pretrained: bool = False
-    checkpoint_path: str = ''
-    
-    # Model architecture parameters (ignored if loading specific pretrained model string)
+    """Model architecture configuration parameters."""
+
+    model_name: str = DEFAULT_MODEL_NAME
     input_dim: int = 1536
     hidden_dim: int = 512
-    num_classes: int = 1  # Will be auto-set for H5 dataset
+    attention_dim: Optional[int] = None
+    num_classes: int = 1
     dropout: float = 0.2
-    n_heads: int = 1
     gated: bool = True
+    n_heads: int = 1
+    encoder_dropout: float = 0.2
+    classifier_dropout: float = 0.2
 
 
 @dataclass
 class TrainingConfig:
-    """Training process configuration parameters"""
-    # General training
+    """Training process configuration parameters."""
+
     epochs: int = 30
     batch_size: int = 1
     learning_rate: float = 0.0005
     weight_decay: float = 1e-5
     seed: int = 42
     device: str = 'cuda'
-    patience: int = 5  # Early stopping patience
-    
-    # Cross-validation
+    patience: int = 5
     k_folds: int = 5
     val_ratio: float = 0.1
-    
-    # Voting strategy for patient-level aggregation
-    # 'majority': Hard voting (majority class wins)
-    # 'average': Soft voting (average probabilities)
-    voting_strategy: str = 'average'
-    
-    # Full dataset training
+    voting_strategy: str = DEFAULT_VOTING_STRATEGY
+    voting_config: Dict[str, float] = field(
+        default_factory=lambda: {'threshold': BINARY_THRESHOLD}
+    )
     best_epochs: int = 9
 
 
@@ -75,6 +70,7 @@ class LoggingConfig:
     save_best_only: bool = True
     log_test_results: bool = True
     test_results_csv: str = 'test_results.csv'
+    save_features: bool = False  # Save features for fusion (train + test sets per fold)
 
 
 @dataclass

@@ -1,74 +1,99 @@
 import os
+import time
+from typing import Any, Callable, Dict
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import KFold, StratifiedGroupKFold, GroupKFold
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
-import numpy as np
-import pandas as pd
-import time
+
+import core.voting_strategies  # noqa: F401
+from config.defaults import BINARY_THRESHOLD
+from core.registry import create_voting_strategy
 
 class Trainer:
-    def __init__(self, model, dataset, config):
-        self.model = model
+    def __init__(self, model_builder: Callable[[], nn.Module], dataset, config):
+        self.model_builder = model_builder
         self.dataset = dataset
         self.config = config
-        
-        # Create convenient access to nested configs
+
         self.model_cfg = config.model
         self.training_cfg = config.training
         self.logging_cfg = config.logging
-        
+
         self.device = torch.device(self.training_cfg.device)
-        
+        self.voting_strategy = self._init_voting_strategy()
+
+    def _init_voting_strategy(self):
+        try:
+            return create_voting_strategy(
+                self.training_cfg.voting_strategy,
+                **(self.training_cfg.voting_config or {}),
+            )
+        except KeyError as exc:
+            print(f"Warning: {exc}. Falling back to average voting.")
+            return create_voting_strategy('average', threshold=BINARY_THRESHOLD)
+
+    def _move_to_device(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+        device_batch: Dict[str, Any] = {}
+        for key, value in batch.items():
+            if torch.is_tensor(value):
+                device_batch[key] = value.to(self.device)
+            else:
+                device_batch[key] = value
+        return device_batch
+
+    @staticmethod
+    def _model_inputs(batch: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: value
+            for key, value in batch.items()
+            if key not in {'label', 'sample_id', 'patient_id'}
+        }
+
     def _train_epoch(self, model, loader, criterion, optimizer):
         model.train()
         total_loss = 0
         correct = 0
         total = 0
         with tqdm(loader, desc="  Training one Epoch", unit="batch", leave=False) as pbar:
-            for batch in pbar:
-                # Support datasets returning (features, label, filename, patient_id)
-                if len(batch) == 4:
-                    features, label, _, _ = batch
-                else:
-                    features, label, _ = batch
-                features = features.to(self.device)
-                label = label.to(self.device)
+            for raw_batch in pbar:
+                batch = self._move_to_device(raw_batch)
+                inputs = self._model_inputs(batch)
+                labels = batch['label']
 
                 optimizer.zero_grad()
-                
-                # Reshape label for model if binary classification to match logits [B, 1]
-                model_label = label.view(-1, 1) if self.model_cfg.num_classes == 1 else label
-                
-                # Pass label and criterion to model to allow internal loss calculation (e.g. CLAM instance loss)
-                logits, loss, _ = model(features, label=model_label, loss_fn=criterion)
-
-                if loss is None:
-                    # Fallback to external loss calculation if model didn't return one
-                    if self.model_cfg.num_classes == 1:
-                        loss = criterion(logits.view(-1), label)
-                    else:
-                        loss = criterion(logits, label.long())
+                outputs = model(inputs)
+                logits = outputs['logits']
 
                 if self.model_cfg.num_classes == 1:
-                    preds = (torch.sigmoid(logits) > 0.5).float().view(-1)
+                    logits = logits.view(-1)
+                    labels = labels.view(-1)
+                    loss = criterion(logits, labels)
+                    probs = torch.sigmoid(logits)
+                    preds = (probs > BINARY_THRESHOLD).float()
                 else:
-                    preds = torch.argmax(logits, dim=1)
+                    loss = criterion(logits, labels.long())
+                    probs = torch.softmax(logits, dim=1)
+                    preds = torch.argmax(probs, dim=1)
 
                 loss.backward()
                 optimizer.step()
 
-                total_loss += loss.item() * features.size(0)
-                correct += (preds == label).sum().item()
-                total += features.size(0)
-        
+                batch_size = labels.size(0)
+                total_loss += loss.item() * batch_size
+                correct += (preds == labels).sum().item()
+                total += batch_size
+
         return total_loss / total, correct / total
 
     def _evaluate_with_auc(self, model, loader, criterion, return_details=False):
-        """Evaluate model and compute AUC for binary/multi-class classification"""
+        """Evaluate model and compute AUC for binary/multi-class classification."""
         model.eval()
         total_loss = 0
         correct = 0
@@ -77,132 +102,186 @@ class Trainer:
         all_probs = []
         all_sample_ids = []
         all_patient_ids = []
-        
+
         with torch.no_grad():
-            for batch in loader:
-                if len(batch) == 4:
-                    features, label, sample_ids, patient_ids = batch
-                else:
-                    features, label, sample_ids = batch
-                    patient_ids = ['unknown'] * len(sample_ids)
-                features = features.to(self.device)
-                label = label.to(self.device)
-                
-                # Reshape label for model if binary classification to match logits [B, 1]
-                model_label = label.view(-1, 1) if self.model_cfg.num_classes == 1 else label
-                
-                # Pass label and criterion to model (though loss is not used for backprop here, it might be logged)
-                logits, loss, _ = model(features, label=model_label, loss_fn=criterion)
-                
-                if loss is None:
-                    if self.model_cfg.num_classes == 1:
-                        loss = criterion(logits.view(-1), label)
-                    else:
-                        loss = criterion(logits, label.long())
-                
+            for raw_batch in loader:
+                batch = self._move_to_device(raw_batch)
+                inputs = self._model_inputs(batch)
+                labels = batch['label']
+                sample_ids = batch.get('sample_id', ['unknown'] * len(labels))
+                patient_ids = batch.get('patient_id', sample_ids)
+
+                outputs = model(inputs)
+                logits = outputs['logits']
+
                 if self.model_cfg.num_classes == 1:
-                    probs = torch.sigmoid(logits).view(-1)
-                    preds = (probs > 0.5).float()
-                    
-                    # Store labels and probabilities
-                    all_labels.extend(label.cpu().numpy())
+                    logits = logits.view(-1)
+                    labels = labels.view(-1)
+                    loss = criterion(logits, labels)
+                    probs = torch.sigmoid(logits)
+                    preds = (probs > BINARY_THRESHOLD).float()
                     all_probs.extend(probs.cpu().numpy())
                 else:
-                    loss = criterion(logits, label.long())
+                    loss = criterion(logits, labels.long())
                     probs = torch.softmax(logits, dim=1)
                     preds = torch.argmax(probs, dim=1)
-                    
-                    # Store labels and probabilities (keep multi-class probs as matrix)
-                    all_labels.extend(label.cpu().numpy())
                     all_probs.extend(probs.cpu().numpy())
-                
+
+                all_labels.extend(labels.cpu().numpy())
                 all_sample_ids.extend(sample_ids)
                 all_patient_ids.extend(patient_ids)
-                    
-                total_loss += loss.item() * features.size(0)
-                correct += (preds == label).sum().item()
-                total += features.size(0)
-        
+
+                batch_size = labels.size(0)
+                total_loss += loss.item() * batch_size
+                correct += (preds == labels).sum().item()
+                total += batch_size
+
         avg_loss = total_loss / total
         accuracy = correct / total
-        
-        # Compute AUC
-        all_labels = np.array(all_labels)
-        all_probs = np.array(all_probs)
-        
+
+        all_labels_np = np.array(all_labels)
+        all_probs_np = np.array(all_probs)
+
         try:
             if self.model_cfg.num_classes == 1:
-                # Binary classification: labels should be 0/1, probs is a 1D array
-                all_labels_int = all_labels.astype(int)
-                auc = roc_auc_score(all_labels_int, all_probs)
+                auc = roc_auc_score(all_labels_np.astype(int), all_probs_np)
             else:
-                # Multi-class AUC (one-vs-rest)
-                # all_probs shape: (n_samples, n_classes)
-                # all_labels: (n_samples,) with integer class labels
-                all_labels_int = all_labels.astype(int)
-                auc = roc_auc_score(all_labels_int, all_probs, multi_class='ovr', average='macro')
+                auc = roc_auc_score(
+                    all_labels_np.astype(int),
+                    all_probs_np,
+                    multi_class='ovr',
+                    average='macro',
+                )
         except Exception as e:
             print(f"\nWarning: Could not compute AUC. Error: {e}")
-            print(f"Labels shape: {all_labels.shape}, unique values: {np.unique(all_labels)}")
-            print(f"Probs shape: {all_probs.shape}, range: [{all_probs.min():.4f}, {all_probs.max():.4f}]")
+            print(f"Labels shape: {all_labels_np.shape}, unique values: {np.unique(all_labels_np)}")
+            print(f"Probs shape: {all_probs_np.shape}")
             auc = 0.0
-            
+
         if return_details:
             return avg_loss, accuracy, auc, {
                 'sample_ids': all_sample_ids,
                 'patient_ids': all_patient_ids,
-                'probs': all_probs,
-                'labels': all_labels
+                'probs': all_probs_np,
+                'labels': all_labels_np,
             }
         return avg_loss, accuracy, auc
 
     def _aggregate_patient_results(self, results_df: pd.DataFrame):
         """Aggregate slide-level predictions to patient-level using configured strategy."""
-        strategy = self.training_cfg.voting_strategy
+        return self.voting_strategy.aggregate(results_df, self.model_cfg.num_classes)
 
-        # Soft voting: mean probabilities per patient
-        if strategy == 'average':
-            if self.model_cfg.num_classes == 1:
-                grouped = results_df.groupby('patient_id')['prob_positive'].mean().reset_index()
-                grouped['prediction'] = (grouped['prob_positive'] > 0.5).astype(int)
-                # For binary AUC, need prob_positive as score
-                return grouped
-            else:
-                prob_cols = [c for c in results_df.columns if c.startswith('prob_class_')]
-                grouped = results_df.groupby('patient_id')[prob_cols].mean().reset_index()
-                grouped['prediction'] = grouped[prob_cols].values.argmax(axis=1)
-                return grouped
+    def extract_features(self, model, loader, normalize=True):
+        """
+        Extract bag-level embeddings from the model for all samples in the loader.
+        Aggregates slide-level features to patient-level using mean pooling.
+        
+        Args:
+            model: Trained MIL model
+            loader: DataLoader containing samples to extract features from
+            normalize: If True, apply L2 normalization to features
+            
+        Returns:
+            dict: {
+                'patient_ids': list of patient IDs,
+                'features': np.ndarray of shape (n_patients, feature_dim),
+                'labels': np.ndarray of shape (n_patients,)
+            }
+        """
+        model.eval()
+        slide_features = []
+        slide_patient_ids = []
+        slide_labels = []
 
-        # Hard voting: majority on predicted class; tie-break by mean prob if available
-        elif strategy == 'majority':
-            if self.model_cfg.num_classes == 1:
-                voted = results_df.groupby('patient_id')['prediction'].agg(lambda x: int(x.sum() >= (len(x) / 2))).reset_index()
-                # Add averaged prob for AUC stability
-                voted = voted.merge(results_df.groupby('patient_id')['prob_positive'].mean().reset_index(), on='patient_id', how='left')
-                return voted
-            else:
-                def vote_row(group):
-                    counts = group['prediction'].value_counts()
-                    top_classes = counts[counts == counts.max()].index.tolist()
-                    if len(top_classes) == 1:
-                        return int(top_classes[0])
-                    # tie-breaker by summed probs if available
-                    prob_cols = [c for c in results_df.columns if c.startswith('prob_class_')]
-                    if prob_cols:
-                        probs_sum = group[prob_cols].sum()
-                        return int(probs_sum.idxmax().replace('prob_class_', ''))
-                    return int(top_classes[0])
+        def _find_classifier_linear(module_root: nn.Module) -> nn.Linear | None:
+            # Heuristic: pick the last Linear whose out_features matches num_classes (or 1 for binary)
+            target_out = 1 if self.model_cfg.num_classes == 1 else int(self.model_cfg.num_classes)
+            candidates: list[nn.Linear] = []
+            for m in module_root.modules():
+                if isinstance(m, nn.Linear) and getattr(m, "out_features", None) == target_out:
+                    candidates.append(m)
+            return candidates[-1] if candidates else None
+        
+        with torch.no_grad():
+            for raw_batch in tqdm(loader, desc="  Extracting features", leave=False):
+                batch = self._move_to_device(raw_batch)
+                inputs = self._model_inputs(batch)
+                patient_ids = batch.get('patient_id', batch.get('sample_id'))
+                labels = batch['label']
 
-                voted = results_df.groupby('patient_id').apply(vote_row).reset_index(name='prediction')
-                # If probability columns exist, keep their mean for possible metrics
-                prob_cols = [c for c in results_df.columns if c.startswith('prob_class_')]
-                if prob_cols:
-                    voted = voted.merge(results_df.groupby('patient_id')[prob_cols].mean().reset_index(), on='patient_id', how='left')
-                return voted
+                outputs = model(inputs)
+                bag_embedding = outputs.get('bag_embeddings')
 
-        else:
-            raise ValueError(f"Unknown voting strategy: {strategy}")
+                if bag_embedding is None:
+                    captured: Dict[str, torch.Tensor] = {}
 
+                    classifier_linear = _find_classifier_linear(model)
+                    if classifier_linear is None and hasattr(model, "model") and isinstance(getattr(model, "model"), nn.Module):
+                        classifier_linear = _find_classifier_linear(getattr(model, "model"))
+
+                    if classifier_linear is None:
+                        raise RuntimeError(
+                            "Model did not return bag embeddings and no classifier Linear layer was found. "
+                            "Please implement embedding output for this model."
+                        )
+
+                    def _hook(mod, inp, out):
+                        if isinstance(inp, (tuple, list)) and inp and isinstance(inp[0], torch.Tensor):
+                            captured['embedding'] = inp[0].detach()
+
+                    handle = classifier_linear.register_forward_hook(_hook)
+                    try:
+                        _ = model(inputs)
+                    finally:
+                        handle.remove()
+
+                    if 'embedding' not in captured:
+                        raise RuntimeError(
+                            "Failed to capture embedding via classifier hook. "
+                            "Please check model forward graph."
+                        )
+                    bag_embedding = captured['embedding']
+
+                slide_features.append(bag_embedding.cpu().numpy())
+                slide_patient_ids.extend(patient_ids)
+                slide_labels.extend(labels.cpu().numpy())
+        
+        # Concatenate all slide features
+        slide_features = np.concatenate(slide_features, axis=0)  # (n_slides, embed_dim)
+        slide_labels = np.array(slide_labels)
+        
+        # Aggregate to patient level using mean pooling
+        patient_features_dict = {}
+        patient_labels_dict = {}
+        
+        for i, pid in enumerate(slide_patient_ids):
+            if pid not in patient_features_dict:
+                patient_features_dict[pid] = []
+                patient_labels_dict[pid] = []
+            patient_features_dict[pid].append(slide_features[i])
+            patient_labels_dict[pid].append(slide_labels[i])
+        
+        # Compute mean features per patient
+        patient_ids_list = list(patient_features_dict.keys())
+        patient_features = np.array([
+            np.mean(patient_features_dict[pid], axis=0) for pid in patient_ids_list
+        ])
+        patient_labels = np.array([
+            int(np.bincount(np.array(patient_labels_dict[pid]).astype(int)).argmax())
+            for pid in patient_ids_list
+        ])
+        
+        # L2 normalize features (important for fusion with zero-padding)
+        if normalize:
+            norms = np.linalg.norm(patient_features, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1, norms)  # avoid division by zero
+            patient_features = patient_features / norms
+        
+        return {
+            'patient_ids': patient_ids_list,
+            'features': patient_features,
+            'labels': patient_labels
+        }
 
     def train_full_dataset(self):
         """
@@ -212,14 +291,7 @@ class Trainer:
         
         train_loader = DataLoader(self.dataset, batch_size=self.training_cfg.batch_size, shuffle=True)
         
-        model = self.model(
-            input_dim=self.model_cfg.input_dim,
-            hidden_dim=self.model_cfg.hidden_dim,
-            num_classes=self.model_cfg.num_classes,
-            n_heads=self.model_cfg.n_heads,
-            dropout=self.model_cfg.dropout,
-            gated=self.model_cfg.gated
-        ).to(self.device)
+        model = self.model_builder().to(self.device)
         
         optimizer = optim.Adam(model.parameters(), lr=self.training_cfg.learning_rate, weight_decay=self.training_cfg.weight_decay)
         
@@ -305,15 +377,7 @@ class Trainer:
 
             print(f"  Fold {fold+1}: Train={len(train_subset)}, Val={len(val_subset)}, Test={len(test_subset)}\n")
 
-            # Initialize model
-            model = self.model(
-                input_dim=self.model_cfg.input_dim,
-                hidden_dim=self.model_cfg.hidden_dim,
-                num_classes=self.model_cfg.num_classes,
-                n_heads=self.model_cfg.n_heads,
-                dropout=self.model_cfg.dropout,
-                gated=self.model_cfg.gated
-            ).to(self.device)
+            model = self.model_builder().to(self.device)
 
             optimizer = optim.Adam(model.parameters(), lr=self.training_cfg.learning_rate, weight_decay=self.training_cfg.weight_decay)
 
@@ -365,6 +429,23 @@ class Trainer:
             test_loss, test_acc, test_auc, test_details = self._evaluate_with_auc(model, test_loader, criterion, return_details=True)
             patient_acc = float('nan')
             patient_auc = float('nan')
+
+            # Extract and save features for fusion (train + test sets)
+            if self.logging_cfg.save_features:
+                print(f"  Extracting features for fusion...")
+                # Create train loader without shuffle for feature extraction
+                train_loader_no_shuffle = DataLoader(train_subset, batch_size=self.training_cfg.batch_size, shuffle=False)
+                
+                train_features = self.extract_features(model, train_loader_no_shuffle, normalize=True)
+                test_features = self.extract_features(model, test_loader, normalize=True)
+                
+                features_path = os.path.join(self.logging_cfg.save_dir, f'fold_{fold+1}_features.pt')
+                torch.save({
+                    'train': train_features,
+                    'test': test_features,
+                    'fold': fold + 1
+                }, features_path)
+                print(f"  Features saved to {features_path}")
 
             if self.logging_cfg.log_test_results:
                 results_df = pd.DataFrame({

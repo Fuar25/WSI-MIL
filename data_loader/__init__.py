@@ -1,1 +1,1 @@
-from .dataset import WSIFeatureDataset, H5FeatureDataset
+from .dataset import WSIDataset

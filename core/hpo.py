@@ -7,8 +7,8 @@ import csv
 from core.trainer import Trainer
 
 class HyperParameterOptimizer:
-    def __init__(self, model_class, dataset, base_config):
-        self.model_class = model_class
+    def __init__(self, model_builder, dataset, base_config):
+        self.model_builder = model_builder
         self.dataset = dataset
         self.base_config = base_config
 
@@ -36,7 +36,7 @@ class HyperParameterOptimizer:
         config.logging.log_test_results = False # Disable detailed logging for speed/storage
         
         # Initialize Trainer
-        trainer = Trainer(self.model_class, self.dataset, config)
+        trainer = Trainer(self.model_builder, self.dataset, config)
         
         # Run Cross-Validation (using fewer folds for speed if needed, but keeping robust)
         # We can use the average Test AUC as the metric to maximize

@@ -2,9 +2,7 @@ import argparse
 import sys
 
 from config.config import runtime_config, visualization_config
-from data_loader.dataset import WSIFeatureDataset, H5FeatureDataset
-from models.mil_models import MILModel
-from models.linear_probe import LinearProbe
+from core.registry import create_dataset, create_model
 from core.trainer import Trainer
 from core.abmil_visualizer import ABMIL_Visualizer
 
@@ -19,58 +17,48 @@ def main():
     
     args = parser.parse_args()
 
-    # Initialize Dataset
-    if runtime_config.dataset.dataset_type == 'h5':
-        if runtime_config.dataset.data_paths is None:
-            print("Error: runtime_config.dataset.data_paths must be provided for H5 dataset.")
-            return
-        dataset = H5FeatureDataset(
-            data_paths=runtime_config.dataset.data_paths,
-            feature_key=runtime_config.dataset.feature_key,
-            binary_mode=runtime_config.dataset.binary_mode
-        )
-        
-        # Auto-configure num_classes based on dataset
-        # For binary classification (2 classes), use num_classes=1
-        # For multi-class (>2 classes), use num_classes=number of classes
-        num_dataset_classes = len(dataset.classes)
-        if num_dataset_classes == 2:
-            runtime_config.model.num_classes = 1  # Binary classification
-            print(f"Auto-configured num_classes to 1 (binary classification) for {num_dataset_classes} classes.")
-        else:
-            # runtime_config.model.num_classes = num_dataset_classes
-            # print(f"Auto-configured num_classes to {runtime_config.model.num_classes} (multi-class).")
-            raise ValueError(f"{num_dataset_classes} classes has not been supported!")
+    # Initialize Dataset via factory
+    dataset_cfg = runtime_config.dataset
+    if dataset_cfg.data_paths is None:
+        print("Error: runtime_config.dataset.data_paths must be provided for dataset initialization.")
+        return
 
-    elif runtime_config.dataset.dataset_type == 'npy':
-        dataset = WSIFeatureDataset(
-            root_dir=runtime_config.dataset.root_dir,
-            csv_path=runtime_config.dataset.csv_path,
-            label_col=runtime_config.dataset.label_col,
-            sample_id_col=runtime_config.dataset.sample_id_col,
-            feature_suffix=runtime_config.dataset.feature_suffix
-        )
+    dataset = create_dataset(
+        dataset_cfg.dataset_name,
+        data_paths=dataset_cfg.data_paths,
+        feature_key=dataset_cfg.feature_key,
+        coords_key=dataset_cfg.coords_key,
+        patient_id_pattern=dataset_cfg.patient_id_pattern,
+        binary_mode=dataset_cfg.binary_mode,
+    )
+
+    num_dataset_classes = len(dataset.classes)
+    if num_dataset_classes == 2:
+        runtime_config.model.num_classes = 1
+        print("Auto-configured num_classes to 1 (binary classification).")
     else:
-        raise TypeError(f"{runtime_config.dataset.dataset_type} type has not been supported!")
+        runtime_config.model.num_classes = num_dataset_classes
+        print(f"Auto-configured num_classes to {num_dataset_classes} (multi-class).")
     
     if len(dataset) == 0:
         print("Error: No data found.")
         return
 
-    # Initialize Trainer
-    if runtime_config.model.model_name == 'linear_probe':
-        model_class = LinearProbe
-    else:
-        # Assume it's a MIL-Lab model
-        # Update mil_lab_model_name if model_name is a specific MIL-Lab model string
-        # If model_name is generic 'abmil', we keep mil_lab_model_name as 'abmil' (or whatever is in config)
-        # If model_name is specific (e.g. 'clam_sb', 'abmil.base...'), we update mil_lab_model_name
-        if runtime_config.model.model_name != 'abmil': 
-             runtime_config.model.mil_lab_model_name = runtime_config.model.model_name
-        
-        model_class = MILModel
+    def model_builder():
+        model_cfg = runtime_config.model
+        return create_model(
+            model_cfg.model_name,
+            input_dim=model_cfg.input_dim,
+            hidden_dim=model_cfg.hidden_dim,
+            num_classes=model_cfg.num_classes,
+            dropout=model_cfg.dropout,
+            attention_dim=model_cfg.attention_dim,
+            gated=model_cfg.gated,
+            encoder_dropout=model_cfg.encoder_dropout,
+            classifier_dropout=model_cfg.classifier_dropout,
+        )
 
-    trainer = Trainer(model_class, dataset, runtime_config)
+    trainer = Trainer(model_builder, dataset, runtime_config)
     
     if args.mode == 'train':
         trainer.train_full_dataset()
@@ -86,7 +74,7 @@ def main():
             print("Error: 'optuna' is required for hyperparameter search. Please install it via 'pip install optuna'.")
             return
 
-        optimizer = HyperParameterOptimizer(model_class, dataset, runtime_config)
+        optimizer = HyperParameterOptimizer(model_builder, dataset, runtime_config)
         optimizer.optimize(n_trials=args.n_trials)
 
     elif args.mode == 'vis':
@@ -111,7 +99,6 @@ def main():
         raise ValueError(f"{args.mode} mode has not been supported!")
 
 if __name__ == "__main__":
-    
     runtime_config.dataset.data_paths = {
         'positive': '/mnt/5T/Tiff/Experiments/Experiment1/Ki-67/MALT/10x_256px_0px_overlap/features_uni_v2',
         'negative': '/mnt/5T/Tiff/Experiments/Experiment1/Ki-67/Reactive/10x_256px_0px_overlap/features_uni_v2'
@@ -122,7 +109,7 @@ if __name__ == "__main__":
     runtime_config.training.seed = 42
     runtime_config.training.voting_strategy = "majority"  # 使用硬投票聚合到patient级
 
-    runtime_config.model.model_name = 'abmil'
+    runtime_config.model.model_name = 'mil'
     runtime_config.model.input_dim = 1536
     runtime_config.model.hidden_dim = 512
     runtime_config.model.n_heads = 4

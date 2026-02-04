@@ -7,8 +7,8 @@ This project has been refactored to support Object-Oriented Design, K-Fold Cross
 - `main.py`: The main entry point. Supports training, cross-validation, and visualization modes.
 - `core/trainer.py`: Contains the `Trainer` class handling training loops, validation, and CV.
 - `core/base.py`: Abstract base classes for Datasets and Models.
-- `data_loader/dataset.py`: `WSIFeatureDataset` inheriting from `BaseDataset`.
-- `models/mil_models.py`: `ABMIL` model inheriting from `BaseModel`.
+- `data_loader/dataset.py`: `WSIDataset` inheriting from `BaseDataset`.
+- `models/mil_models.py`: modular MIL wrapper built from encoder/aggregator/classifier components.
 - `config/config.py`: Configuration file.
 
 ## How to Use

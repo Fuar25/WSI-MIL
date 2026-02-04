@@ -1,7 +1,12 @@
+from typing import Dict
+
 import torch
 import torch.nn as nn
-from core.base import BaseModel
 
+from core.interfaces import BaseModel, DataDict
+from core.registry import register_model
+
+@register_model('linear_probe')
 class LinearProbe(BaseModel):
     """
     Linear Probe model for WSI classification using pre-computed WSI-level features.
@@ -23,19 +28,10 @@ class LinearProbe(BaseModel):
         self.linear = nn.Linear(input_dim, num_classes)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         
-    def forward(self, x):
-        """
-        Args:
-            x: (batch_size, input_dim) or (batch_size, 1, input_dim)
-        """
-        # Handle case where input has an extra dimension [B, 1, D]
-        if x.dim() == 3 and x.size(1) == 1:
-            x = x.squeeze(1)
-            
-        # Apply dropout
-        x = self.dropout(x)
-        
-        # Linear projection
-        logits = self.linear(x)
-        
-        return logits, None  # Return None for attention scores
+    def forward(self, data_dict: DataDict) -> Dict[str, torch.Tensor]:
+        features = data_dict['features']
+        if features.dim() == 3 and features.size(1) == 1:
+            features = features.squeeze(1)
+        features = self.dropout(features)
+        logits = self.linear(features)
+        return {'logits': logits}
